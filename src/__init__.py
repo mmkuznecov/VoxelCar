@@ -17,6 +17,17 @@ from .compose import compose_side_by_side
 from .dataset import generate_sample, generate_dataset
 from .ui import demo
 
+from .train_utils import (
+    OccupancyDataset,
+    split_by_run,
+    OccNet,
+    EgoGridConfig,
+    compute_fov_mask,
+    sample_world_voxels_to_ego,
+    save_sample_figure,
+    plot_curves,
+)
+
 __all__ = [
     # config
     "NUM_CAMERAS",
@@ -49,4 +60,13 @@ __all__ = [
     "generate_dataset",
     # ui
     "demo",
+    # train_utils
+    "OccupancyDataset",
+    "split_by_run",
+    "OccNet",
+    "EgoGridConfig",
+    "compute_fov_mask",
+    "sample_world_voxels_to_ego",
+    "save_sample_figure",
+    "plot_curves",
 ]

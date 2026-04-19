@@ -34,7 +34,6 @@ from .bev import compute_heading, render_bev, build_camera_overlays
 from .compose import compose_side_by_side
 from .dataset import generate_sample
 
-
 # ---------------------------------------------------------------------------
 # Helpers for mapping between flat Gradio args and typed configs
 # ---------------------------------------------------------------------------

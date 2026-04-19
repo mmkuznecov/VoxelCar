@@ -17,7 +17,6 @@ from PIL import Image, ImageDraw
 
 from .camera import compute_camera_world_pose
 
-
 # ---------------------------------------------------------------------------
 # Heading / geometry helpers
 # ---------------------------------------------------------------------------
