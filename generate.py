@@ -16,8 +16,8 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from src import WorldConfig, TrajectoryConfig, RenderConfig, default_cameras
-from src import generate_dataset
+from src.config import WorldConfig, TrajectoryConfig, RenderConfig, default_cameras
+from src.dataset import generate_dataset
 
 
 def _parse_args(argv=None):
@@ -26,7 +26,7 @@ def _parse_args(argv=None):
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
-        "--out-dir", default="./data/dataset", help="Root directory for dataset runs."
+        "--out-dir", default="./dataset", help="Root directory for dataset runs."
     )
     p.add_argument("--n", type=int, default=5, help="Number of samples to generate.")
     p.add_argument(
@@ -55,6 +55,21 @@ def _parse_args(argv=None):
     p.add_argument("--fps", type=int, default=10)
     p.add_argument(
         "--n-samples", type=int, default=200, help="Ray-march samples per camera ray."
+    )
+
+    # Parallelism
+    p.add_argument(
+        "--n-jobs",
+        type=int,
+        default=-1,
+        help="Parallel worker processes (joblib). "
+        "-1 = all cores, 1 = serial (keeps per-frame progress).",
+    )
+    p.add_argument(
+        "--verbose",
+        type=int,
+        default=10,
+        help="joblib verbose level (0 silent, 10 per-task progress).",
     )
 
     # Camera overrides (comma-separated list of 1-based indices to enable).
@@ -115,7 +130,12 @@ def main(argv=None):
     print(f"  traj  : {asdict(traj_cfg)}")
     print(f"  render: {asdict(render_cfg)}")
     print(f"  cams  : {[(c.idx, c.name, c.enabled) for c in cameras]}")
+    print(f"  n_jobs: {a.n_jobs}   (joblib verbose={a.verbose})")
     print()
+
+    # Fine-grained per-frame callback only works serially; in parallel mode
+    # joblib's own verbose output reports per-task completion.
+    progress_fn = progress if a.n_jobs == 1 else None
 
     metas = generate_dataset(
         a.out_dir,
@@ -125,7 +145,9 @@ def main(argv=None):
         traj_cfg=traj_cfg,
         cameras=cameras,
         render_cfg=render_cfg,
-        progress_fn=progress,
+        progress_fn=progress_fn,
+        n_jobs=a.n_jobs,
+        verbose=a.verbose,
     )
     print()
     print(

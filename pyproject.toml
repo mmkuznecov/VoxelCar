@@ -10,6 +10,7 @@ dependencies = [
     "imageio>=2.31",
     "imageio-ffmpeg>=0.4.9",
     "Pillow>=10.0",
+    "joblib>=1.3",
 ]
 
 # Application mode: uv manages the venv + deps, does not try to build

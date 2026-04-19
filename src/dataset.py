@@ -216,12 +216,29 @@ def generate_dataset(
     render_cfg=None,
     vary_seeds=True,
     progress_fn=None,
+    n_jobs=-1,
+    verbose=10,
+    backend="loky",
 ):
     """Generate N samples into ``out_root`` as ``run_0000/``, ``run_0001/``, ...
 
     With ``vary_seeds=True`` (default) each run derives new world- and
     trajectory-seeds from ``base_seed + i`` / ``base_seed + i + 1000``. The
     non-seed fields of the passed configs are preserved.
+
+    Parameters
+    ----------
+    n_jobs
+        Number of parallel worker processes. ``-1`` uses all cores; ``1``
+        runs serially (and is the only mode where ``progress_fn`` is honoured,
+        since the nested per-frame callback can't cross process boundaries).
+    verbose
+        Verbosity passed to :class:`joblib.Parallel`. ``0`` silent,
+        ``>=1`` reports per-task completion.
+    backend
+        joblib backend — ``"loky"`` (default, process-based) is the right
+        choice for this CPU-heavy workload; ``"threading"`` is available for
+        debugging but will not actually parallelise the Python orchestration.
     """
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -230,7 +247,9 @@ def generate_dataset(
     cameras = cameras or default_cameras()
     render_cfg = render_cfg or RenderConfig()
 
-    run_metas = []
+    # Resolve every per-run config up front so workers receive fully-formed
+    # task tuples and seeds remain deterministic regardless of execution order.
+    tasks = []
     for i in range(int(n_samples)):
         run_dir = out_root / f"run_{i:04d}"
         if vary_seeds:
@@ -240,21 +259,44 @@ def generate_dataset(
             )
         else:
             wc, tc = world_cfg, traj_cfg
+        tasks.append((run_dir, wc, tc, f"run_{i:04d}"))
 
-        def _frame_cb(fi, nf, _i=i):
-            if progress_fn is not None:
-                progress_fn(_i, int(n_samples), fi, nf)
+    if n_jobs == 1:
+        # Serial path — preserves the fine-grained per-frame progress_fn.
+        run_metas = []
+        for i, (run_dir, wc, tc, run_id) in enumerate(tasks):
 
-        meta = generate_sample(
-            run_dir,
-            wc,
-            tc,
-            cameras,
-            render_cfg,
-            run_id=f"run_{i:04d}",
-            progress_fn=_frame_cb if progress_fn is not None else None,
+            def _frame_cb(fi, nf, _i=i):
+                if progress_fn is not None:
+                    progress_fn(_i, int(n_samples), fi, nf)
+
+            run_metas.append(
+                generate_sample(
+                    run_dir,
+                    wc,
+                    tc,
+                    cameras,
+                    render_cfg,
+                    run_id=run_id,
+                    progress_fn=_frame_cb if progress_fn is not None else None,
+                )
+            )
+    else:
+        # Parallel path — joblib's verbose handles progress; the fine-grained
+        # progress_fn is skipped since it can't cross process boundaries.
+        from joblib import Parallel, delayed
+
+        run_metas = Parallel(n_jobs=n_jobs, verbose=verbose, backend=backend)(
+            delayed(generate_sample)(
+                run_dir,
+                wc,
+                tc,
+                cameras,
+                render_cfg,
+                run_id=run_id,
+            )
+            for (run_dir, wc, tc, run_id) in tasks
         )
-        run_metas.append(meta)
 
     with open(out_root / "manifest.json", "w") as f:
         json.dump(
@@ -262,6 +304,7 @@ def generate_dataset(
                 "n_samples": int(n_samples),
                 "base_seed": int(base_seed),
                 "vary_seeds": bool(vary_seeds),
+                "n_jobs": int(n_jobs),
                 "runs": [m["run_id"] for m in run_metas],
             },
             f,
