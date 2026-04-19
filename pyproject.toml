@@ -1,0 +1,19 @@
+[project]
+name = "voxel-car-demo"
+version = "0.1.0"
+description = "Procedural voxel landscape driving simulator with multi-camera rendering and dataset generator."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "gradio>=4.0",
+    "numpy>=1.24",
+    "imageio>=2.31",
+    "imageio-ffmpeg>=0.4.9",
+    "Pillow>=10.0",
+]
+
+# Application mode: uv manages the venv + deps, does not try to build
+# this project itself (the code lives under ``src/`` and is run directly
+# with ``uv run python app.py`` from the project root).
+[tool.uv]
+package = false
