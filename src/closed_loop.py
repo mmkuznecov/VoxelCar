@@ -128,6 +128,7 @@ def simulate_episode(
     image_hw,
     device,
     fov_mask=None,
+    policy=None,
     margin_deg=3.0,
     max_steps=100,
     step_size=1.0,
@@ -152,17 +153,20 @@ def simulate_episode(
 ):
     """Run one closed-loop episode.
 
-    Parameters
-    ----------
-    scenario     : Scenario — holds voxels + entry/exit + reference traj.
-    model        : trained OccNet on ``device``.
-    ego_cfg      : EgoGridConfig matching the trained model.
-    cam_cfg      : CameraConfig (the forward camera, same as training).
-    image_hw     : (H, W) to render the forward camera at.
-    fov_mask     : precomputed ``(Dx, Dy, Dz)`` bool mask. If None, computed here.
-    margin_deg   : FOV margin for the mask (only used if fov_mask is None).
-    stuck_window : consider the car stuck if it makes less than
-                   ``stuck_min_progress_m`` in this many consecutive steps.
+    If ``policy`` is None, the existing A* planner is used.
+
+    If ``policy`` is provided, it replaces A*. The policy object must expose:
+
+        policy.act(
+            pred_occ,
+            ego_cfg,
+            car_pos,
+            car_heading,
+            world_goal,
+        ) -> PlannerResult
+
+    This is used by run_closed_loop_rl.py for:
+        camera image -> OccNet -> RL policy -> motion
     """
     H, W = image_hw
     VX, VY, VZ = scenario.voxels.shape
@@ -176,8 +180,12 @@ def simulate_episode(
     pos = [float(scenario.entry_xy[0]), float(scenario.entry_xy[1])]
     heading = [float(scenario.entry_heading[0]), float(scenario.entry_heading[1])]
 
+    if policy is not None and hasattr(policy, "reset"):
+        policy.reset()
+
     ep = EpisodeRecord(scenario_name=scenario.name, goal_xy=scenario.exit_xy)
     pos_history = [tuple(pos)]
+
     # Track closest approach — lets us detect "we reached goal area then
     # started moving away", which is effectively success even if the single-
     # step tolerance check missed it.
@@ -201,28 +209,37 @@ def simulate_episode(
         # ---- model forward ----
         pred = predict_occupancy(model, img, device)
 
-        # ---- planner ----
-        result = plan_next_step(
-            pred,
-            ego_cfg,
-            tuple(pos),
-            tuple(heading),
-            scenario.exit_xy,
-            fov_mask=fov_mask,
-            step_size=float(step_size),
-            max_turn_deg=float(max_turn_deg),
-            lookahead_cells=int(lookahead_cells),
-            inflate=int(inflate),
-            close_range_cells=int(close_range_cells),
-            treat_unknown_close_as_obstacle=bool(treat_unknown_close_as_obstacle),
-            soft_cost_weight=float(soft_cost_weight),
-            heading_penalty=float(heading_penalty),
-            forward_bias=float(forward_bias),
-            world_shape=(VX, VY) if use_world_bounds else None,
-            world_margin=float(world_margin),
-            goal_slow_radius=float(goal_slow_radius),
-            goal_slow_min_fraction=float(goal_slow_min_fraction),
-        )
+        # ---- planner / policy ----
+        if policy is None:
+            result = plan_next_step(
+                pred,
+                ego_cfg,
+                tuple(pos),
+                tuple(heading),
+                scenario.exit_xy,
+                fov_mask=fov_mask,
+                step_size=float(step_size),
+                max_turn_deg=float(max_turn_deg),
+                lookahead_cells=int(lookahead_cells),
+                inflate=int(inflate),
+                close_range_cells=int(close_range_cells),
+                treat_unknown_close_as_obstacle=bool(treat_unknown_close_as_obstacle),
+                soft_cost_weight=float(soft_cost_weight),
+                heading_penalty=float(heading_penalty),
+                forward_bias=float(forward_bias),
+                world_shape=(VX, VY) if use_world_bounds else None,
+                world_margin=float(world_margin),
+                goal_slow_radius=float(goal_slow_radius),
+                goal_slow_min_fraction=float(goal_slow_min_fraction),
+            )
+        else:
+            result = policy.act(
+                pred_occ=pred,
+                ego_cfg=ego_cfg,
+                car_pos=tuple(pos),
+                car_heading=tuple(heading),
+                world_goal=scenario.exit_xy,
+            )
 
         ep.steps.append(
             StepRecord(
@@ -258,9 +275,7 @@ def simulate_episode(
             return ep
 
         # Overshoot detection: if we were once well within ~1.5× tolerance and
-        # we're now moving away (d_goal rising), count it as success. Catches
-        # the "drove past the goal" case that single-step tolerance misses when
-        # step_size > tolerance or the plan doesn't stop exactly on target.
+        # we're now moving away, count it as success.
         overshoot_tol = float(goal_tolerance) * 1.5
         if min_d_goal < overshoot_tol and d_goal > min_d_goal + 0.5:
             ep.outcome = "success"
@@ -287,7 +302,8 @@ def simulate_episode(
             recent = pos_history[-int(stuck_window) :]
             dist = sum(
                 math.hypot(
-                    recent[i][0] - recent[i - 1][0], recent[i][1] - recent[i - 1][1]
+                    recent[i][0] - recent[i - 1][0],
+                    recent[i][1] - recent[i - 1][1],
                 )
                 for i in range(1, len(recent))
             )

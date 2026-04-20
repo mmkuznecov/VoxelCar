@@ -11,20 +11,13 @@ dependencies = [
     "imageio-ffmpeg>=0.4.9",
     "Pillow>=10.0",
     "joblib>=1.3",
-]
-
-# Optional deps for the monocular-occupancy training pipeline
-# (preprocess.py + train.py). Install with:
-#   uv sync --extra train
-[project.optional-dependencies]
-train = [
+    "gymnasium>=1.1.1",
+    "stable-baselines3>=2.7.1",
+    "tensorboard>=2.20.0",
     "torch",
     "matplotlib",
     "tqdm",
 ]
 
-# Application mode: uv manages the venv + deps, does not try to build
-# this project itself (the code lives under ``src/`` and is run directly
-# with ``uv run python app.py`` from the project root).
 [tool.uv]
 package = false
