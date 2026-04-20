@@ -38,7 +38,6 @@ from src import save_episode_video, save_summary_figure
 from src import generate_scenario, SCENARIO_PRESETS
 from src import compute_fov_mask
 
-# Hardcoded as requested — override with --ckpt for anything else.
 DEFAULT_CKPT = "runs/20260419_223836/ckpt_best.pt"
 
 
@@ -98,6 +97,81 @@ def _parse_args(argv=None):
         type=float,
         default=3.0,
         help="FOV mask angular margin (should match training).",
+    )
+
+    # Planner safety / behaviour knobs
+    p.add_argument(
+        "--inflate",
+        type=int,
+        default=2,
+        help="Obstacle dilation in cells (car half-width safety buffer). "
+        "2 ≈ 2m buffer for a 2.4m-wide car. Lower if the car gets stuck.",
+    )
+    p.add_argument(
+        "--close-range-cells",
+        type=int,
+        default=3,
+        help="Rows within this many cells of the car are handled "
+        "pessimistically to guard against the camera blind spot.",
+    )
+    p.add_argument(
+        "--no-blind-spot-pessimism",
+        action="store_true",
+        help="Disable 'treat close-range unknown as obstacle' — use this "
+        "if the car gets stuck on wide-open roads.",
+    )
+    p.add_argument(
+        "--soft-cost-weight",
+        type=float,
+        default=4.0,
+        help="Strength of the distance-transform cost field. Higher → "
+        "A* hugs the middle of free corridors more strongly.",
+    )
+    p.add_argument(
+        "--heading-penalty",
+        type=float,
+        default=0.3,
+        help="A* extra cost per heading change. Higher = smoother plans.",
+    )
+    p.add_argument(
+        "--forward-bias",
+        type=float,
+        default=0.7,
+        help="Sub-goal selection: 1.0 always straight-ahead, 0.0 aim at "
+        "global goal. 0.7 balances progress vs. not yanking the wheel "
+        "toward an unseen exit.",
+    )
+
+    # World-boundary safety — prevents driving off the map when the camera
+    # sees only sky (the model can't detect the edge of the world from its
+    # image; we have to tell the planner about world shape directly).
+    p.add_argument(
+        "--no-world-bounds",
+        action="store_true",
+        help="Disable world-boundary obstacles in the cost map. "
+        "Only useful for debugging; leave ON for safety.",
+    )
+    p.add_argument(
+        "--world-margin",
+        type=float,
+        default=2.0,
+        help="Metres of buffer inside the world edge the car treats "
+        "as obstacle. 2m ≈ car half-length.",
+    )
+
+    # Goal approach — slow down near the goal to avoid overshoot.
+    p.add_argument(
+        "--goal-slow-radius",
+        type=float,
+        default=10.0,
+        help="Within this distance of the world goal, step size is "
+        "reduced linearly so the car doesn't overshoot.",
+    )
+    p.add_argument(
+        "--goal-slow-min-fraction",
+        type=float,
+        default=0.25,
+        help="Minimum step-size fraction inside the slow radius.",
     )
 
     # Output
@@ -174,6 +248,16 @@ def main(argv=None):
             step_size=float(a.step_size),
             max_turn_deg=float(a.max_turn_deg),
             lookahead_cells=int(a.lookahead_cells),
+            inflate=int(a.inflate),
+            close_range_cells=int(a.close_range_cells),
+            treat_unknown_close_as_obstacle=(not a.no_blind_spot_pessimism),
+            soft_cost_weight=float(a.soft_cost_weight),
+            heading_penalty=float(a.heading_penalty),
+            forward_bias=float(a.forward_bias),
+            use_world_bounds=(not a.no_world_bounds),
+            world_margin=float(a.world_margin),
+            goal_slow_radius=float(a.goal_slow_radius),
+            goal_slow_min_fraction=float(a.goal_slow_min_fraction),
             verbose=True,
         )
         sim_s = time.time() - t0

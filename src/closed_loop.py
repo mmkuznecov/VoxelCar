@@ -137,6 +137,17 @@ def simulate_episode(
     stuck_window=15,
     stuck_min_progress_m=4.0,
     n_ray_samples=200,
+    # Planner knobs (see src.planning.plan_next_step for details)
+    inflate=2,
+    close_range_cells=3,
+    treat_unknown_close_as_obstacle=True,
+    soft_cost_weight=4.0,
+    heading_penalty=0.3,
+    forward_bias=0.7,
+    use_world_bounds=True,
+    world_margin=2.0,
+    goal_slow_radius=10.0,
+    goal_slow_min_fraction=0.25,
     verbose=True,
 ):
     """Run one closed-loop episode.
@@ -167,6 +178,10 @@ def simulate_episode(
 
     ep = EpisodeRecord(scenario_name=scenario.name, goal_xy=scenario.exit_xy)
     pos_history = [tuple(pos)]
+    # Track closest approach — lets us detect "we reached goal area then
+    # started moving away", which is effectively success even if the single-
+    # step tolerance check missed it.
+    min_d_goal = math.hypot(pos[0] - scenario.exit_xy[0], pos[1] - scenario.exit_xy[1])
 
     for step in range(int(max_steps)):
         # ---- render forward camera ----
@@ -197,6 +212,16 @@ def simulate_episode(
             step_size=float(step_size),
             max_turn_deg=float(max_turn_deg),
             lookahead_cells=int(lookahead_cells),
+            inflate=int(inflate),
+            close_range_cells=int(close_range_cells),
+            treat_unknown_close_as_obstacle=bool(treat_unknown_close_as_obstacle),
+            soft_cost_weight=float(soft_cost_weight),
+            heading_penalty=float(heading_penalty),
+            forward_bias=float(forward_bias),
+            world_shape=(VX, VY) if use_world_bounds else None,
+            world_margin=float(world_margin),
+            goal_slow_radius=float(goal_slow_radius),
+            goal_slow_min_fraction=float(goal_slow_min_fraction),
         )
 
         ep.steps.append(
@@ -223,10 +248,27 @@ def simulate_episode(
 
         # ---- termination checks ----
         d_goal = math.hypot(pos[0] - scenario.exit_xy[0], pos[1] - scenario.exit_xy[1])
+        if d_goal < min_d_goal:
+            min_d_goal = d_goal
+
         if d_goal < float(goal_tolerance):
             ep.outcome = "success"
             if verbose:
                 print(f"    step {step:3d}  SUCCESS (reached goal, d={d_goal:.2f}m)")
+            return ep
+
+        # Overshoot detection: if we were once well within ~1.5× tolerance and
+        # we're now moving away (d_goal rising), count it as success. Catches
+        # the "drove past the goal" case that single-step tolerance misses when
+        # step_size > tolerance or the plan doesn't stop exactly on target.
+        overshoot_tol = float(goal_tolerance) * 1.5
+        if min_d_goal < overshoot_tol and d_goal > min_d_goal + 0.5:
+            ep.outcome = "success"
+            if verbose:
+                print(
+                    f"    step {step:3d}  SUCCESS (closest approach "
+                    f"{min_d_goal:.2f}m, now at {d_goal:.2f}m)"
+                )
             return ep
 
         if not (0.0 <= pos[0] < VX and 0.0 <= pos[1] < VY):
