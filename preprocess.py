@@ -41,7 +41,7 @@ import numpy as np
 import imageio.v2 as imageio
 from tqdm import tqdm
 
-from src import (
+from voxel_car import (
     CameraConfig,
     EgoGridConfig,
     compute_fov_mask,

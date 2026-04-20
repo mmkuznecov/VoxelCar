@@ -25,11 +25,11 @@ from typing import List, Optional, Tuple
 import numpy as np
 import torch
 
-from .camera import compute_camera_world_pose, render_camera_view
-from .config import CameraConfig
-from .planning import plan_next_step, check_collision, PlannerResult
-from .train_utils.ego import EgoGridConfig, compute_fov_mask
-from .train_utils.model import OccNet
+from ..rendering.camera import compute_camera_world_pose, render_camera_view
+from ..common.config import CameraConfig
+from ..planning import plan_next_step, check_collision, PlannerResult
+from ..geometry.ego import EgoGridConfig, compute_fov_mask
+from ..perception.model import OccNet
 
 # ---------------------------------------------------------------------------
 # Data records

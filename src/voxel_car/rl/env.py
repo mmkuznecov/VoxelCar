@@ -18,19 +18,14 @@ from typing import Optional
 
 import numpy as np
 
-try:
-    import gymnasium as gym
-    from gymnasium import spaces
-except ImportError as e:
-    raise ImportError(
-        "RL support requires gymnasium. Install with: "
-        "pip install gymnasium stable-baselines3 tensorboard"
-    ) from e
+import gymnasium as gym
+from gymnasium import spaces
 
-from .scenarios import generate_scenario, SCENARIO_PRESETS
-from .train_utils.ego import EgoGridConfig, sample_world_voxels_to_ego
-from .planning import check_collision
-from .rl_policy import (
+
+from ..worldgen.scenarios import generate_scenario, SCENARIO_PRESETS
+from ..geometry.ego import EgoGridConfig, sample_world_voxels_to_ego
+from ..planning import check_collision
+from .policy import (
     rl_observation_dim,
     build_rl_observation,
     action_to_planner_result,

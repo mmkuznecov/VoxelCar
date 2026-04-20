@@ -33,7 +33,13 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from src import OccupancyDataset, split_by_run, OccNet, save_sample_figure, plot_curves
+from voxel_car import (
+    OccupancyDataset,
+    split_by_run,
+    OccNet,
+    save_sample_figure,
+    plot_curves,
+)
 
 # ---------------------------------------------------------------------------
 # Loss & metrics

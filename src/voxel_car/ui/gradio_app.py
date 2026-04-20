@@ -19,7 +19,7 @@ import gradio as gr
 import imageio.v2 as imageio
 import numpy as np
 
-from .config import (
+from ..common.config import (
     NUM_CAMERAS,
     CAMERA_COLORS,
     DEFAULT_CAMERA_SPECS,
@@ -28,11 +28,11 @@ from .config import (
     TrajectoryConfig,
     RenderConfig,
 )
-from .world import get_world_and_trajectory
-from .camera import compute_camera_world_pose, render_camera_view
-from .bev import compute_heading, render_bev, build_camera_overlays
-from .compose import compose_side_by_side
-from .dataset import generate_sample
+from ..worldgen.world import get_world_and_trajectory
+from ..rendering.camera import compute_camera_world_pose, render_camera_view
+from ..rendering.bev import compute_heading, render_bev, build_camera_overlays
+from ..rendering.compose import compose_side_by_side
+from ..datasets.dataset import generate_sample
 
 # ---------------------------------------------------------------------------
 # Helpers for mapping between flat Gradio args and typed configs

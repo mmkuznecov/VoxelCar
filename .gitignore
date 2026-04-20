@@ -213,3 +213,4 @@ runs/
 closed_loop_runs/
 rl_runs
 closed_loop_rl_runs
+prompt.txt

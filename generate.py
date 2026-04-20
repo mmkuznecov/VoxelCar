@@ -16,8 +16,13 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from src.config import WorldConfig, TrajectoryConfig, RenderConfig, default_cameras
-from src.dataset import generate_dataset
+from voxel_car import (
+    WorldConfig,
+    TrajectoryConfig,
+    RenderConfig,
+    default_cameras,
+    generate_dataset,
+)
 
 
 def _parse_args(argv=None):
