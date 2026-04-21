@@ -17,6 +17,7 @@ dependencies = [
     "torch",
     "matplotlib",
     "tqdm",
+    "huggingface_hub>=0.23"
 ]
 
 [build-system]

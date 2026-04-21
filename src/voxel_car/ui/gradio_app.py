@@ -1,18 +1,30 @@
 """Gradio UI for the voxel car demo.
 
-Offers three actions:
-  1. Live BEV preview that refreshes on slider release.
-  2. Single aligned "BEV + selected camera" MP4 generation.
-  3. Full dataset-sample save (voxels, trajectory, bev video, per-camera videos,
-     metadata) to a user-specified directory.
+Two modes:
+
+1. Random generator
+   - mostly the original procedural demo
+   - previews random worlds/cameras
+   - renders BEV + selected camera video
+   - saves full dataset samples
+
+2. Closed-loop model demo
+   - loads trained OccNet checkpoint from Hugging Face Hub or local file
+   - optionally loads trained PPO policy from Hugging Face Hub or local file
+   - default Hub repo: mmkuznecov/SynthOccPredModels
+   - runs one random scenario
+   - controller:
+        A* planner over OccNet predictions
+        PPO-RL planner over OccNet predictions
 """
 
 from __future__ import annotations
+
 import json
 import os
 import tempfile
 import time
-from dataclasses import asdict
+from functools import lru_cache
 from pathlib import Path
 
 import gradio as gr
@@ -29,10 +41,46 @@ from ..common.config import (
     RenderConfig,
 )
 from ..worldgen.world import get_world_and_trajectory
+from ..worldgen.scenarios import SCENARIO_PRESETS, generate_scenario
 from ..rendering.camera import compute_camera_world_pose, render_camera_view
 from ..rendering.bev import compute_heading, render_bev, build_camera_overlays
 from ..rendering.compose import compose_side_by_side
 from ..datasets.dataset import generate_sample
+from ..geometry import compute_fov_mask
+from ..simulation import (
+    simulate_episode,
+    load_model_from_ckpt,
+    episode_summary,
+    save_episode_video,
+    save_summary_figure,
+)
+from ..rl import RLPolicyAdapter
+from ..hub import (
+    DEFAULT_HF_REPO,
+    DEFAULT_OCC_FILENAME,
+    DEFAULT_RL_FILENAME,
+    load_occnet_from_hf,
+    load_ppo_from_hf,
+)
+
+# ---------------------------------------------------------------------------
+# Generic helpers
+# ---------------------------------------------------------------------------
+
+
+def _expand_path(path: str | Path) -> Path:
+    return Path(os.path.expandvars(str(path))).expanduser()
+
+
+def _random_seed():
+    return int(np.random.randint(0, 1_000_000))
+
+
+def _default_model_source():
+    # DEFAULT_HF_REPO is now built in as mmkuznecov/SynthOccPredModels, unless
+    # VOXEL_CAR_HF_REPO overrides it.
+    return "Hugging Face Hub" if DEFAULT_HF_REPO else "Local files"
+
 
 # ---------------------------------------------------------------------------
 # Helpers for mapping between flat Gradio args and typed configs
@@ -43,6 +91,7 @@ def _flat_to_cameras(flat):
     """(enabled, fwd, rgt, height, yaw, fov) × N  →  list[CameraConfig]."""
     if len(flat) != NUM_CAMERAS * 6:
         raise ValueError(f"expected {NUM_CAMERAS * 6} camera values, got {len(flat)}")
+
     out = []
     for i in range(NUM_CAMERAS):
         b = i * 6
@@ -82,12 +131,13 @@ def _build_configs(
         noise_scale=float(noisec),
         shoulder_extra=int(shoulder),
     )
-    # Derive traj seed from world seed so the UI keeps a single "master" seed.
+
     traj_cfg = TrajectoryConfig(
         seed=int(seed) + 1000,
         n_segments=int(n_segs),
         noise_amplitude=float(noise_amp),
     )
+
     render_cfg = RenderConfig(**(render_kw or {}))
     return world_cfg, traj_cfg, render_cfg
 
@@ -103,7 +153,7 @@ def _traj_info_text(seg_types, trajectory):
 
 
 # ---------------------------------------------------------------------------
-# Callbacks
+# Original random-generator callbacks
 # ---------------------------------------------------------------------------
 
 
@@ -132,7 +182,7 @@ def update_preview(
     h = compute_heading(traj, idx0)
 
     include = {c.idx for c in cams if c.enabled}
-    include.add(sel_idx)  # always show the camera that feeds the video
+    include.add(sel_idx)
     overlays = build_camera_overlays(cams, traj[idx0], h, include_idxs=include)
 
     bev = render_bev(voxels, traj, idx0, h, camera_overlays=overlays, display_size=420)
@@ -172,7 +222,7 @@ def generate_video(
         noise_amp,
     )
     voxels, traj, _seg_types = get_world_and_trajectory(world_cfg, traj_cfg)
-    VX, VY, VZ = voxels.shape
+    VX, VY, _VZ = voxels.shape
 
     nf = int(num_frames)
     W = int(img_w)
@@ -195,6 +245,7 @@ def generate_video(
         wp = traj[idx]
         h = compute_heading(traj, idx)
         pos, _hd, R = compute_camera_world_pose(wp, h, sel_cam)
+
         cam_img = render_camera_view(
             voxels,
             pos,
@@ -206,10 +257,12 @@ def generate_video(
             t_far=t_far,
             n_samples=200,
         )
+
         overlays = build_camera_overlays(cams, wp, h, include_idxs=include)
         bev_img = render_bev(
             voxels, traj, idx, h, camera_overlays=overlays, display_size=420
         )
+
         frames.append(
             compose_side_by_side(bev_img, cam_img, bev_label, cam_label, target_h=360)
         )
@@ -251,6 +304,7 @@ def save_dataset_sample(
         n_segs,
         noise_amp,
     )
+
     render_cfg = RenderConfig(
         img_w=int(img_w),
         img_h=int(img_h),
@@ -263,7 +317,12 @@ def save_dataset_sample(
     run_dir = root / f"sample_{stamp}_seed{int(seed)}"
 
     meta = generate_sample(
-        run_dir, world_cfg, traj_cfg, cams, render_cfg, run_id=run_dir.name
+        run_dir,
+        world_cfg,
+        traj_cfg,
+        cams,
+        render_cfg,
+        run_id=run_dir.name,
     )
 
     summary = {
@@ -273,6 +332,214 @@ def save_dataset_sample(
         "files": meta["files"],
     }
     return f"✔ saved\n{json.dumps(summary, indent=2)}"
+
+
+# ---------------------------------------------------------------------------
+# Closed-loop model callbacks
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=4)
+def _cached_load_occ_model(
+    model_source: str,
+    repo_id: str,
+    occ_hf_file: str,
+    local_occ_path: str,
+):
+    if model_source == "Local files":
+        p = _expand_path(local_occ_path)
+        if not p.exists():
+            raise FileNotFoundError(f"Local OccNet checkpoint not found: {p}")
+        return load_model_from_ckpt(p)
+
+    repo_id = str(repo_id).strip() or DEFAULT_HF_REPO
+    if not repo_id:
+        raise ValueError(
+            "HF repo id is empty. Fill the repo textbox or set VOXEL_CAR_HF_REPO."
+        )
+
+    return load_occnet_from_hf(
+        repo_id=repo_id,
+        filename=str(occ_hf_file).strip() or DEFAULT_OCC_FILENAME,
+    )
+
+
+@lru_cache(maxsize=4)
+def _cached_load_ppo_model(
+    model_source: str,
+    repo_id: str,
+    rl_hf_file: str,
+    local_rl_path: str,
+):
+    if model_source == "Local files":
+        p = _expand_path(local_rl_path)
+        if not p.exists():
+            raise FileNotFoundError(f"Local PPO policy not found: {p}")
+
+        from stable_baselines3 import PPO
+
+        return PPO.load(str(p), device="cpu")
+
+    repo_id = str(repo_id).strip() or DEFAULT_HF_REPO
+    if not repo_id:
+        raise ValueError(
+            "HF repo id is empty. Fill the repo textbox or set VOXEL_CAR_HF_REPO."
+        )
+
+    return load_ppo_from_hf(
+        repo_id=repo_id,
+        filename=str(rl_hf_file).strip() or DEFAULT_RL_FILENAME,
+        device="cpu",
+    )
+
+
+def run_closed_loop_model_demo(
+    model_source,
+    repo_id,
+    occ_hf_file,
+    rl_hf_file,
+    local_occ_path,
+    local_rl_path,
+    planner_name,
+    preset,
+    seed,
+    max_steps,
+    fps,
+    render_video,
+):
+    """Run one closed-loop scenario with either A* or RL policy."""
+    try:
+        repo_id = str(repo_id).strip() or DEFAULT_HF_REPO
+
+        model, ego_cfg, cam_cfg, image_hw, device = _cached_load_occ_model(
+            str(model_source),
+            repo_id,
+            str(occ_hf_file),
+            str(local_occ_path),
+        )
+
+        H, W = image_hw
+        seed = int(seed)
+        preset = str(preset)
+
+        policy = None
+        controller = "astar"
+
+        if str(planner_name).startswith("PPO"):
+            ppo = _cached_load_ppo_model(
+                str(model_source),
+                repo_id,
+                str(rl_hf_file),
+                str(local_rl_path),
+            )
+            policy = RLPolicyAdapter(
+                model=ppo,
+                step_size=1.0,
+                max_turn_deg=15.0,
+                min_speed_fraction=0.10,
+                deterministic=True,
+            )
+            controller = "ppo_rl"
+
+        scenario = generate_scenario(
+            seed=seed,
+            preset=preset,
+            name=f"{preset}_seed{seed}_{controller}",
+        )
+
+        fov_mask = compute_fov_mask(
+            ego_cfg,
+            cam_cfg,
+            image_w=W,
+            image_h=H,
+            margin_deg=3.0,
+        )
+
+        episode = simulate_episode(
+            scenario,
+            model,
+            ego_cfg,
+            cam_cfg,
+            (H, W),
+            device,
+            fov_mask=fov_mask,
+            policy=policy,
+            margin_deg=3.0,
+            max_steps=int(max_steps),
+            step_size=1.0,
+            max_turn_deg=15.0,
+            lookahead_cells=3,
+            inflate=2,
+            close_range_cells=3,
+            treat_unknown_close_as_obstacle=True,
+            soft_cost_weight=4.0,
+            heading_penalty=0.3,
+            forward_bias=0.7,
+            use_world_bounds=True,
+            world_margin=2.0,
+            goal_slow_radius=10.0,
+            goal_slow_min_fraction=0.25,
+            verbose=False,
+        )
+
+        out_dir = Path(tempfile.mkdtemp(prefix="voxel_closed_loop_"))
+
+        final_png = out_dir / f"{scenario.name}_final.png"
+        save_summary_figure(episode, scenario, cam_cfg, ego_cfg, final_png)
+
+        video_path = None
+        if bool(render_video):
+            video_path = out_dir / f"{scenario.name}.mp4"
+            save_episode_video(
+                episode,
+                scenario,
+                cam_cfg,
+                ego_cfg,
+                video_path,
+                fps=int(fps),
+            )
+
+        summary = episode_summary(episode)
+        summary.update(
+            {
+                "controller": controller,
+                "planner": str(planner_name),
+                "model_source": str(model_source),
+                "repo_id": repo_id if model_source != "Local files" else None,
+                "occ_hf_file": str(occ_hf_file) or DEFAULT_OCC_FILENAME,
+                "rl_hf_file": (
+                    str(rl_hf_file) or DEFAULT_RL_FILENAME
+                    if controller == "ppo_rl"
+                    else None
+                ),
+                "local_occ_path": (
+                    str(local_occ_path) if model_source == "Local files" else None
+                ),
+                "local_rl_path": (
+                    str(local_rl_path)
+                    if model_source == "Local files" and controller == "ppo_rl"
+                    else None
+                ),
+                "preset": preset,
+                "seed": seed,
+                "image_shape": [H, W],
+                "ego_cfg": ego_cfg.to_dict(),
+                "camera": cam_cfg.to_dict(),
+                "entry_xy": [float(scenario.entry_xy[0]), float(scenario.entry_xy[1])],
+                "exit_xy": [float(scenario.exit_xy[0]), float(scenario.exit_xy[1])],
+                "seg_types": list(scenario.seg_types),
+                "outputs_dir": str(out_dir),
+            }
+        )
+
+        return (
+            str(video_path) if video_path is not None else None,
+            str(final_png) if final_png.exists() else None,
+            summary,
+        )
+
+    except Exception as exc:
+        raise gr.Error(str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -289,209 +556,425 @@ def _color_dot_html(rgb):
 
 
 def build_demo():
-    with gr.Blocks(title="Voxel Car Demo — multi-camera & dataset") as demo:
+    with gr.Blocks(title="Voxel Car Demo") as demo:
         gr.Markdown(
-            "# 🚗 Voxel landscape — multi-camera drive & dataset generator\n"
-            "Trajectories are built from a random mix of **line / arc / sine** "
-            "segments with tangent continuity and added noise. The landscape "
-            "adapts to the trajectory: a strict road band is carved flat and "
-            "the surrounding terrain fades smoothly via a shoulder zone. "
-            "Configure cameras, preview the layout live, and then either "
-            "render a side-by-side video or save a full dataset sample."
+            "# Voxel Car Demo\n"
+            "Random procedural generation plus closed-loop model evaluation. "
+            "Closed-loop mode runs OccNet occupancy prediction with either "
+            "standard A* planning or a pretrained PPO-RL controller.\n\n"
+            f"**Default model repo:** `{DEFAULT_HF_REPO}`"
         )
 
-        with gr.Row():
-            # ----------------- LEFT: controls -----------------
-            with gr.Column(scale=1, min_width=380):
-
-                with gr.Group():
-                    gr.Markdown("### World")
-                    seed = gr.Slider(
-                        0,
-                        1000,
-                        value=42,
-                        step=1,
-                        label="Seed (drives world + trajectory)",
-                    )
-                    grid = gr.Slider(
-                        40, 140, value=80, step=10, label="Grid size (voxels / side)"
-                    )
-                    obsth = gr.Slider(
-                        5, 22, value=14, step=1, label="Max obstacle height (voxels)"
-                    )
-                    roadw = gr.Slider(
-                        2, 6, value=3, step=1, label="Road half-width (voxels)"
-                    )
-                    noisec = gr.Slider(8, 40, value=18, step=2, label="Noise scale")
-                    shoulder = gr.Slider(
-                        0, 8, value=2, step=1, label="Shoulder extra radius (voxels)"
-                    )
-
-                with gr.Group():
-                    gr.Markdown("### Trajectory")
-                    n_segs = gr.Slider(
-                        2, 12, value=6, step=1, label="Number of segments"
-                    )
-                    noise_amp = gr.Slider(
-                        0.0,
-                        1.5,
-                        value=0.4,
-                        step=0.05,
-                        label="Per-waypoint noise amplitude",
-                    )
-                    traj_info = gr.Markdown("_(will populate after preview)_")
-
-                with gr.Group():
-                    gr.Markdown("### Drive / render")
-                    nfr = gr.Slider(10, 120, value=40, step=5, label="Number of frames")
-                    imgw = gr.Slider(
-                        96, 320, value=180, step=20, label="Camera image width (px)"
-                    )
-                    imgh = gr.Slider(
-                        72, 240, value=136, step=4, label="Camera image height (px)"
-                    )
-                    fps = gr.Slider(5, 24, value=10, step=1, label="Output FPS")
-
+        with gr.Tabs():
+            # -----------------------------------------------------------------
+            # TAB 1: original random generator
+            # -----------------------------------------------------------------
+            with gr.Tab("Random generator"):
                 gr.Markdown(
-                    "### Cameras\n"
-                    "_Offsets are in metres from car centre. **+right** = "
-                    "passenger-side. **+yaw** = rotate camera toward car's right._"
-                )
-
-                cam_controls = []  # NUM_CAMERAS × (en, fwd, rgt, h, yaw, fov)
-                for i in range(NUM_CAMERAS):
-                    name, en0, fwd0, rgt0, h0, yaw0, fov0 = DEFAULT_CAMERA_SPECS[i]
-                    dot = _color_dot_html(CAMERA_COLORS[i])
-                    with gr.Accordion(f"Camera {i+1} — {name}", open=(i == 0)):
-                        gr.Markdown(f"{dot} Frustum colour on BEV")
-                        en = gr.Checkbox(
-                            value=en0,
-                            label="Draw this camera's frustum on BEV / save its video",
-                        )
-                        fwd = gr.Slider(
-                            -5, 5, value=fwd0, step=0.1, label="Forward offset (m)"
-                        )
-                        rgt = gr.Slider(
-                            -3, 3, value=rgt0, step=0.1, label="Right offset (m)"
-                        )
-                        h = gr.Slider(0.3, 6.0, value=h0, step=0.1, label="Height (m)")
-                        yaw = gr.Slider(
-                            -180,
-                            180,
-                            value=yaw0,
-                            step=1,
-                            label="Yaw vs car forward (deg)",
-                        )
-                        fov = gr.Slider(
-                            30, 140, value=fov0, step=1, label="Horizontal FOV (deg)"
-                        )
-                        cam_controls.extend([en, fwd, rgt, h, yaw, fov])
-
-                selected = gr.Dropdown(
-                    choices=[f"Camera {i+1}" for i in range(NUM_CAMERAS)],
-                    value="Camera 1",
-                    label="Camera shown in the composed video",
+                    "Generate a procedural voxel road scene, preview camera "
+                    "frustums, render a side-by-side video, or save a dataset sample."
                 )
 
                 with gr.Row():
-                    preview_btn = gr.Button("↻ Refresh preview")
-                    gen_btn = gr.Button("▶ Generate video", variant="primary")
+                    # ----------------- LEFT: controls -----------------
+                    with gr.Column(scale=1, min_width=380):
 
-                gr.Markdown("### Dataset save")
-                out_root_text = gr.Textbox(
-                    value="./dataset",
-                    label="Output root directory",
-                )
-                save_btn = gr.Button("💾 Save full dataset sample", variant="secondary")
-                save_status = gr.Textbox(
-                    label="Save status",
-                    lines=8,
-                    interactive=False,
-                    value="Click 'Save' to write voxels + videos + metadata for the current configuration.",
-                )
+                        with gr.Group():
+                            gr.Markdown("### World")
+                            with gr.Row():
+                                seed = gr.Slider(
+                                    0,
+                                    1_000_000,
+                                    value=42,
+                                    step=1,
+                                    label="Seed",
+                                )
+                                rand_seed_btn = gr.Button("Random seed")
 
-            # ----------------- RIGHT: outputs -----------------
-            with gr.Column(scale=2):
-                preview_img = gr.Image(
-                    label="Layout preview — BEV at start pose",
-                    height=440,
-                    type="numpy",
-                    show_label=True,
-                )
-                video_out = gr.Video(label="Aligned BEV + selected camera view")
+                            grid = gr.Slider(
+                                40,
+                                140,
+                                value=80,
+                                step=10,
+                                label="Grid size (voxels / side)",
+                            )
+                            obsth = gr.Slider(
+                                5,
+                                22,
+                                value=14,
+                                step=1,
+                                label="Max obstacle height (voxels)",
+                            )
+                            roadw = gr.Slider(
+                                2,
+                                6,
+                                value=3,
+                                step=1,
+                                label="Road half-width (voxels)",
+                            )
+                            noisec = gr.Slider(
+                                8,
+                                40,
+                                value=18,
+                                step=2,
+                                label="Noise scale",
+                            )
+                            shoulder = gr.Slider(
+                                0,
+                                8,
+                                value=2,
+                                step=1,
+                                label="Shoulder extra radius (voxels)",
+                            )
 
-        # ------------------ event wiring ------------------
-        preview_inputs = [
-            seed,
-            grid,
-            obsth,
-            roadw,
-            noisec,
-            shoulder,
-            n_segs,
-            noise_amp,
-            *cam_controls,
-            selected,
-        ]
+                        with gr.Group():
+                            gr.Markdown("### Trajectory")
+                            n_segs = gr.Slider(
+                                2,
+                                12,
+                                value=6,
+                                step=1,
+                                label="Number of segments",
+                            )
+                            noise_amp = gr.Slider(
+                                0.0,
+                                1.5,
+                                value=0.4,
+                                step=0.05,
+                                label="Per-waypoint noise amplitude",
+                            )
+                            traj_info = gr.Markdown("_(will populate after preview)_")
 
-        for comp in preview_inputs:
-            if isinstance(comp, gr.Slider):
-                comp.release(
+                        with gr.Group():
+                            gr.Markdown("### Drive / render")
+                            nfr = gr.Slider(
+                                10,
+                                120,
+                                value=40,
+                                step=5,
+                                label="Number of frames",
+                            )
+                            imgw = gr.Slider(
+                                96,
+                                320,
+                                value=180,
+                                step=20,
+                                label="Camera image width (px)",
+                            )
+                            imgh = gr.Slider(
+                                72,
+                                240,
+                                value=136,
+                                step=4,
+                                label="Camera image height (px)",
+                            )
+                            fps = gr.Slider(
+                                5,
+                                24,
+                                value=10,
+                                step=1,
+                                label="Output FPS",
+                            )
+
+                        gr.Markdown(
+                            "### Cameras\n"
+                            "Offsets are in metres from car centre. "
+                            "**+right** = passenger-side. "
+                            "**+yaw** = rotate camera toward car's right."
+                        )
+
+                        cam_controls = []
+                        for i in range(NUM_CAMERAS):
+                            name, en0, fwd0, rgt0, h0, yaw0, fov0 = (
+                                DEFAULT_CAMERA_SPECS[i]
+                            )
+                            dot = _color_dot_html(CAMERA_COLORS[i])
+                            with gr.Accordion(
+                                f"Camera {i + 1} — {name}", open=(i == 0)
+                            ):
+                                gr.Markdown(f"{dot} Frustum colour on BEV")
+                                en = gr.Checkbox(
+                                    value=en0,
+                                    label="Draw this camera's frustum / save its video",
+                                )
+                                fwd = gr.Slider(
+                                    -5,
+                                    5,
+                                    value=fwd0,
+                                    step=0.1,
+                                    label="Forward offset (m)",
+                                )
+                                rgt = gr.Slider(
+                                    -3,
+                                    3,
+                                    value=rgt0,
+                                    step=0.1,
+                                    label="Right offset (m)",
+                                )
+                                h = gr.Slider(
+                                    0.3,
+                                    6.0,
+                                    value=h0,
+                                    step=0.1,
+                                    label="Height (m)",
+                                )
+                                yaw = gr.Slider(
+                                    -180,
+                                    180,
+                                    value=yaw0,
+                                    step=1,
+                                    label="Yaw vs car forward (deg)",
+                                )
+                                fov = gr.Slider(
+                                    30,
+                                    140,
+                                    value=fov0,
+                                    step=1,
+                                    label="Horizontal FOV (deg)",
+                                )
+                                cam_controls.extend([en, fwd, rgt, h, yaw, fov])
+
+                        selected = gr.Dropdown(
+                            choices=[f"Camera {i + 1}" for i in range(NUM_CAMERAS)],
+                            value="Camera 1",
+                            label="Camera shown in composed video",
+                        )
+
+                        with gr.Row():
+                            preview_btn = gr.Button("Refresh preview")
+                            gen_btn = gr.Button("Generate video", variant="primary")
+
+                        gr.Markdown("### Dataset save")
+                        out_root_text = gr.Textbox(
+                            value="./dataset",
+                            label="Output root directory",
+                        )
+                        save_btn = gr.Button(
+                            "Save full dataset sample",
+                            variant="secondary",
+                        )
+                        save_status = gr.Textbox(
+                            label="Save status",
+                            lines=8,
+                            interactive=False,
+                            value=(
+                                "Click Save to write voxels + videos + metadata "
+                                "for the current configuration."
+                            ),
+                        )
+
+                    # ----------------- RIGHT: outputs -----------------
+                    with gr.Column(scale=2):
+                        preview_img = gr.Image(
+                            label="Layout preview — BEV at start pose",
+                            height=440,
+                            type="numpy",
+                            show_label=True,
+                        )
+                        video_out = gr.Video(label="Aligned BEV + selected camera view")
+
+                preview_inputs = [
+                    seed,
+                    grid,
+                    obsth,
+                    roadw,
+                    noisec,
+                    shoulder,
+                    n_segs,
+                    noise_amp,
+                    *cam_controls,
+                    selected,
+                ]
+
+                for comp in preview_inputs:
+                    if isinstance(comp, gr.Slider):
+                        comp.release(
+                            update_preview,
+                            inputs=preview_inputs,
+                            outputs=[preview_img, traj_info],
+                        )
+                    elif isinstance(comp, (gr.Checkbox, gr.Dropdown)):
+                        comp.change(
+                            update_preview,
+                            inputs=preview_inputs,
+                            outputs=[preview_img, traj_info],
+                        )
+
+                rand_seed_btn.click(_random_seed, outputs=seed)
+
+                preview_btn.click(
                     update_preview,
                     inputs=preview_inputs,
                     outputs=[preview_img, traj_info],
                 )
-            elif isinstance(comp, (gr.Checkbox, gr.Dropdown)):
-                comp.change(
+
+                gen_inputs = [
+                    seed,
+                    grid,
+                    obsth,
+                    roadw,
+                    noisec,
+                    shoulder,
+                    n_segs,
+                    noise_amp,
+                    nfr,
+                    imgw,
+                    imgh,
+                    fps,
+                    *cam_controls,
+                    selected,
+                ]
+                gen_btn.click(generate_video, inputs=gen_inputs, outputs=video_out)
+
+                save_inputs = [
+                    out_root_text,
+                    seed,
+                    grid,
+                    obsth,
+                    roadw,
+                    noisec,
+                    shoulder,
+                    n_segs,
+                    noise_amp,
+                    nfr,
+                    imgw,
+                    imgh,
+                    fps,
+                    *cam_controls,
+                    selected,
+                ]
+                save_btn.click(
+                    save_dataset_sample,
+                    inputs=save_inputs,
+                    outputs=save_status,
+                )
+
+                demo.load(
                     update_preview,
                     inputs=preview_inputs,
                     outputs=[preview_img, traj_info],
                 )
 
-        preview_btn.click(
-            update_preview, inputs=preview_inputs, outputs=[preview_img, traj_info]
-        )
+            # -----------------------------------------------------------------
+            # TAB 2: closed-loop model demo
+            # -----------------------------------------------------------------
+            with gr.Tab("Closed-loop model demo"):
+                gr.Markdown(
+                    "Run a closed-loop scenario using the trained occupancy model. "
+                    "Choose either the standard A* planner or the pretrained PPO-RL planner. "
+                    f"By default, models are pulled from `{DEFAULT_HF_REPO}`."
+                )
 
-        gen_inputs = [
-            seed,
-            grid,
-            obsth,
-            roadw,
-            noisec,
-            shoulder,
-            n_segs,
-            noise_amp,
-            nfr,
-            imgw,
-            imgh,
-            fps,
-            *cam_controls,
-            selected,
-        ]
-        gen_btn.click(generate_video, inputs=gen_inputs, outputs=video_out)
+                with gr.Row():
+                    with gr.Column(scale=1, min_width=420):
+                        with gr.Group():
+                            gr.Markdown("### Model source")
+                            model_source = gr.Dropdown(
+                                choices=["Hugging Face Hub", "Local files"],
+                                value=_default_model_source(),
+                                label="Load models from",
+                            )
 
-        save_inputs = [
-            out_root_text,
-            seed,
-            grid,
-            obsth,
-            roadw,
-            noisec,
-            shoulder,
-            n_segs,
-            noise_amp,
-            nfr,
-            imgw,
-            imgh,
-            fps,
-            *cam_controls,
-            selected,
-        ]
-        save_btn.click(save_dataset_sample, inputs=save_inputs, outputs=save_status)
+                            repo_id = gr.Textbox(
+                                value=DEFAULT_HF_REPO,
+                                label="HF repo id",
+                                placeholder="mmkuznecov/SynthOccPredModels",
+                            )
+                            occ_hf_file = gr.Textbox(
+                                value=DEFAULT_OCC_FILENAME,
+                                label="HF OccNet checkpoint filename",
+                            )
+                            rl_hf_file = gr.Textbox(
+                                value=DEFAULT_RL_FILENAME,
+                                label="HF PPO policy filename",
+                            )
 
-        demo.load(
-            update_preview, inputs=preview_inputs, outputs=[preview_img, traj_info]
-        )
+                            gr.Markdown("Local fallback / local mode paths")
+                            local_occ_path = gr.Textbox(
+                                value="runs/20260419_223836/ckpt_best.pt",
+                                label="Local OccNet checkpoint",
+                            )
+                            local_rl_path = gr.Textbox(
+                                value="rl_runs/easy_oracle_ppo/ppo_voxel_car_final.zip",
+                                label="Local PPO policy",
+                            )
+
+                        with gr.Group():
+                            gr.Markdown("### Scenario")
+                            planner_name = gr.Dropdown(
+                                choices=[
+                                    "A* planner over OccNet prediction",
+                                    "PPO-RL planner over OccNet prediction",
+                                ],
+                                value="A* planner over OccNet prediction",
+                                label="Controller",
+                            )
+                            preset = gr.Dropdown(
+                                choices=list(SCENARIO_PRESETS.keys()),
+                                value="winding",
+                                label="Scenario preset",
+                            )
+
+                            with gr.Row():
+                                closed_seed = gr.Number(
+                                    value=777,
+                                    precision=0,
+                                    label="Seed",
+                                )
+                                closed_rand_seed_btn = gr.Button("Random seed")
+
+                            max_steps = gr.Slider(
+                                20,
+                                200,
+                                value=100,
+                                step=1,
+                                label="Max simulation steps",
+                            )
+                            closed_fps = gr.Slider(
+                                1,
+                                12,
+                                value=4,
+                                step=1,
+                                label="Video FPS",
+                            )
+                            render_video = gr.Checkbox(
+                                value=True,
+                                label="Render MP4 video",
+                            )
+
+                            run_btn = gr.Button(
+                                "Run closed-loop scenario",
+                                variant="primary",
+                            )
+
+                    with gr.Column(scale=2):
+                        closed_video = gr.Video(label="Closed-loop rollout")
+                        final_img = gr.Image(
+                            label="Final summary snapshot",
+                            type="filepath",
+                        )
+                        run_summary = gr.JSON(label="Run summary")
+
+                closed_rand_seed_btn.click(_random_seed, outputs=closed_seed)
+
+                run_btn.click(
+                    run_closed_loop_model_demo,
+                    inputs=[
+                        model_source,
+                        repo_id,
+                        occ_hf_file,
+                        rl_hf_file,
+                        local_occ_path,
+                        local_rl_path,
+                        planner_name,
+                        preset,
+                        closed_seed,
+                        max_steps,
+                        closed_fps,
+                        render_video,
+                    ],
+                    outputs=[closed_video, final_img, run_summary],
+                )
 
     return demo
 
