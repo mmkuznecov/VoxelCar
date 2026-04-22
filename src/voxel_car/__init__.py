@@ -3,7 +3,7 @@
 Re-exports the most commonly-used names from the subpackages so callers can
 write `from voxel_car import OccNet, simulate_episode` instead of hunting
 through the subpackage hierarchy. Less-common helpers are still available
-via their subpackage (e.g. `voxel_car.rl.VoxelCarRLEnv`).
+via their subpackage, e.g. `voxel_car.rl.VoxelCarRLEnv`.
 """
 
 from .common import (
@@ -70,6 +70,15 @@ from .simulation import (
     save_episode_video,
     save_summary_figure,
 )
+from .estimation import (
+    LinearKalmanFilter,
+    KalmanState,
+    VehicleEKF,
+    EKFConfig,
+    PoseMeasurement,
+    wrap_angle,
+    noisy_pose_measurement,
+)
 from .ui import demo
 
 __version__ = "0.1.0"
@@ -131,6 +140,14 @@ __all__ = [
     "render_episode_frame",
     "save_episode_video",
     "save_summary_figure",
+    # estimation
+    "LinearKalmanFilter",
+    "KalmanState",
+    "VehicleEKF",
+    "EKFConfig",
+    "PoseMeasurement",
+    "wrap_angle",
+    "noisy_pose_measurement",
     # ui
     "demo",
 ]
