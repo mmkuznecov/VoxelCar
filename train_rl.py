@@ -25,8 +25,8 @@ from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
-from src.rl_env import VoxelCarRLEnv
-from src.rl_artifacts import (
+from voxel_car.rl import (
+    VoxelCarRLEnv,
     RLMetricsCallback,
     write_training_plots,
     write_training_summary,

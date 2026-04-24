@@ -24,11 +24,11 @@ import numpy as np
 import imageio.v2 as imageio
 from PIL import Image
 
-from .config import WorldConfig, TrajectoryConfig, RenderConfig, default_cameras
-from .trajectory import build_trajectory
-from .world import build_world
-from .camera import compute_camera_world_pose, render_camera_view
-from .bev import compute_heading, render_bev, build_camera_overlays
+from ..common.config import WorldConfig, TrajectoryConfig, RenderConfig, default_cameras
+from ..worldgen.trajectory import build_trajectory
+from ..worldgen.world import build_world
+from ..rendering.camera import compute_camera_world_pose, render_camera_view
+from ..rendering.bev import compute_heading, render_bev, build_camera_overlays
 
 
 def _safe_name(s):

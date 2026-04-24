@@ -3,7 +3,7 @@
 from __future__ import annotations
 import numpy as np
 
-from .noise import value_noise_2d
+from ..common.noise import value_noise_2d
 from .trajectory import build_trajectory
 
 

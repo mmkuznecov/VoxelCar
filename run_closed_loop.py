@@ -33,10 +33,16 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src import simulate_episode, load_model_from_ckpt, episode_summary
-from src import save_episode_video, save_summary_figure
-from src import generate_scenario, SCENARIO_PRESETS
-from src import compute_fov_mask
+from voxel_car import (
+    simulate_episode,
+    load_model_from_ckpt,
+    episode_summary,
+    save_episode_video,
+    save_summary_figure,
+    generate_scenario,
+    SCENARIO_PRESETS,
+    compute_fov_mask,
+)
 
 DEFAULT_CKPT = "runs/20260419_223836/ckpt_best.pt"
 

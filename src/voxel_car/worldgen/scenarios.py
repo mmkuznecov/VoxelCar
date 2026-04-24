@@ -15,7 +15,7 @@ import math
 from dataclasses import dataclass, field
 import numpy as np
 
-from .config import WorldConfig, TrajectoryConfig
+from ..common.config import WorldConfig, TrajectoryConfig
 from .trajectory import build_trajectory
 from .world import build_world
 

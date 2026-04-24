@@ -8,7 +8,7 @@ from pathlib import Path
 
 from stable_baselines3 import PPO
 
-from src.rl_env import VoxelCarRLEnv
+from voxel_car.rl import VoxelCarRLEnv
 
 
 def _parse_args(argv=None):

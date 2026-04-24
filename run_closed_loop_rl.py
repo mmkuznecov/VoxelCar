@@ -19,7 +19,7 @@ from pathlib import Path
 
 from stable_baselines3 import PPO
 
-from src import (
+from voxel_car import (
     simulate_episode,
     load_model_from_ckpt,
     episode_summary,
@@ -29,7 +29,7 @@ from src import (
     SCENARIO_PRESETS,
     compute_fov_mask,
 )
-from src.rl_policy import RLPolicyAdapter
+from voxel_car.rl import RLPolicyAdapter
 
 DEFAULT_CKPT = "runs/20260419_223836/ckpt_best.pt"
 
