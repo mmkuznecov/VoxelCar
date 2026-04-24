@@ -1,6 +1,6 @@
 # Voxel Car / SynthOccPred
 
-[Hugging Face Demo](https://huggingface.co/spaces/mmkuznecov/VoxelCar)
+[![Hugging Face Demo](https://img.shields.io/badge/🤗%20Hugging%20Face-Demo-yellow?style=for-the-badge)](https://huggingface.co/spaces/mmkuznecov/VoxelCar)
 
 `voxel_car` is a procedural voxel-world driving project for monocular occupancy prediction and closed-loop planning.
 
