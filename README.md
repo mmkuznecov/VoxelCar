@@ -11,6 +11,35 @@ The current package is organized as a Python `src/` layout package under `src/vo
 
 ---
 
+## Quick start — run the full pipeline
+
+The entire pipeline (generate → preprocess → train OccNet → A\* eval → train PPO → PPO eval) can be run with a single script from the repo root:
+
+```bash
+./full_pipeline.sh
+```
+
+Key environment-variable knobs (all have sensible defaults):
+
+| Variable | Default | Description |
+|---|---|---|
+| `N_SAMPLES` | `15000` | Number of generated worlds |
+| `OCC_EPOCHS` | `10` | OccNet training epochs |
+| `OCC_BATCH_SIZE` | `128` | OccNet batch size |
+| `RL_STEPS` | `1000000` | PPO total environment steps |
+| `RL_N_ENVS` | `8` | Parallel training environments |
+| `RL_PRESET` | `easy` | Scenario preset for RL training |
+| `EVAL_OCC_N` | `20` | Closed-loop A\* evaluation episodes |
+| `EVAL_RL_CL_N` | `20` | Closed-loop PPO evaluation episodes |
+
+Skip any stage with:
+
+```bash
+SKIP_GENERATE=1 SKIP_PREPROCESS=1 ./full_pipeline.sh
+```
+
+---
+
 ## What this project does
 
 Overall pipeline:
@@ -28,7 +57,7 @@ closed-loop driving:
     camera image → OccNet prediction → planner / RL policy → simulator step
 ```
 
-The simulator itself has access to ground-truth voxels for rendering and scoring, but the closed-loop controller only uses the camera image and the model’s predicted ego occupancy.
+The simulator itself has access to ground-truth voxels for rendering and scoring, but the closed-loop controller only uses the camera image and the model's predicted ego occupancy.
 
 ---
 
@@ -40,73 +69,115 @@ Here are example outputs from the dataset generator and closed-loop evaluation.
 
 Static BEV snapshot:
 
-![Run 0000 BEV static](figures/run_0000_bev_static.png)
+![Run 0000 BEV static](figures/example_runs/run_0000_bev_static.png)
 
 BEV rollout preview:
 
-![Run 0000 BEV rollout](figures/run_0000_bev_video.gif)
-
-Source video: [run_0000_bev_video.mp4](figures/run_0000_bev_video.mp4)
+![Run 0000 BEV rollout](figures/example_runs/run_0000_bev_video.gif)
 
 Forward camera preview:
 
-![Run 0000 front camera](figures/run_0000_cam_0_front.gif)
-
-Source video: [run_0000_cam_0_front.mp4](figures/run_0000_cam_0_front.mp4)
+![Run 0000 front camera](figures/example_runs/run_0000_cam_0_front.gif)
 
 ### Run 0001
 
 Static BEV snapshot:
 
-![Run 0001 BEV static](figures/run_0001_bev_static.png)
+![Run 0001 BEV static](figures/example_runs/run_0001_bev_static.png)
 
 BEV rollout preview:
 
-![Run 0001 BEV rollout](figures/run_0001_bev_video.gif)
-
-Source video: [run_0001_bev_video.mp4](figures/run_0001_bev_video.mp4)
+![Run 0001 BEV rollout](figures/example_runs/run_0001_bev_video.gif)
 
 Forward camera preview:
 
-![Run 0001 front camera](figures/run_0001_cam_0_front.gif)
-
-Source video: [run_0001_cam_0_front.mp4](figures/run_0001_cam_0_front.mp4)
+![Run 0001 front camera](figures/example_runs/run_0001_cam_0_front.gif)
 
 ### Run 0002
 
 Static BEV snapshot:
 
-![Run 0002 BEV static](figures/run_0002_bev_static.png)
+![Run 0002 BEV static](figures/example_runs/run_0002_bev_static.png)
 
 BEV rollout preview:
 
-![Run 0002 BEV rollout](figures/run_0002_bev_video.gif)
-
-Source video: [run_0002_bev_video.mp4](figures/run_0002_bev_video.mp4)
+![Run 0002 BEV rollout](figures/example_runs/run_0002_bev_video.gif)
 
 Forward camera preview:
 
-![Run 0002 front camera](figures/run_0002_cam_0_front.gif)
-
-Source video: [run_0002_cam_0_front.mp4](figures/run_0002_cam_0_front.mp4)
+![Run 0002 front camera](figures/example_runs/run_0002_cam_0_front.gif)
 
 ### Run 0003
 
 Static BEV snapshot:
 
-![Run 0003 BEV static](figures/run_0003_bev_static.png)
+![Run 0003 BEV static](figures/example_runs/run_0003_bev_static.png)
 
 BEV rollout preview:
 
-![Run 0003 BEV rollout](figures/run_0003_bev_video.gif)
-
-Source video: [run_0003_bev_video.mp4](figures/run_0003_bev_video.mp4)
+![Run 0003 BEV rollout](figures/example_runs/run_0003_bev_video.gif)
 
 Forward camera preview:
 
-![Run 0003 front camera](figures/run_0003_cam_0_front.gif)
+![Run 0003 front camera](figures/example_runs/run_0003_cam_0_front.gif)
 
-Source video: [run_0003_cam_0_front.mp4](figures/run_0003_cam_0_front.mp4)
+---
+
+## Closed-loop evaluation examples
+
+### A\* planner over OccNet predictions — winding scenario, seed 795
+
+This rollout uses the trained OccNet to predict ego-frame occupancy from the forward camera at each step. A\* plans the next motion over the predicted BEV cost map. Ground-truth voxels are only used for rendering and collision scoring — the planner never sees them.
+
+![Closed-loop A* winding seed795](figures/closed_loop_eval/winding_18_seed795.gif)
+
+### PPO-RL policy over OccNet predictions — easy scenario, seed 795
+
+This rollout uses the same OccNet backbone but replaces A\* with a pretrained PPO policy. The policy was trained in the fast oracle-BEV environment and is here deployed on OccNet-predicted occupancy.
+
+![Closed-loop RL easy seed795](figures/closed_loop_eval/easy_18_seed795_rl.gif)
+
+---
+
+## RL training plots
+
+Training curves from the PPO run (`output/RLModel/ppo_main`).
+
+### Reward curve
+
+Episode reward (raw and rolling mean) over the course of training.
+
+![Reward curve](figures/rl_plots/reward_curve.png)
+
+### Episode length
+
+How many steps episodes take on average as the policy improves.
+
+![Episode length](figures/rl_plots/episode_length_curve.png)
+
+### Rolling outcome rates
+
+Rolling success, collision, OOB, timeout and stuck rates over episodes.
+
+![Outcome rates](figures/rl_plots/outcome_rates.png)
+
+### Final outcome counts
+
+Total episode counts by outcome over the full training run.
+
+![Outcome counts](figures/rl_plots/outcome_counts.png)
+
+### Distance to goal
+
+Final distance to the goal at episode end (lower = closer to success).
+
+![Distance to goal](figures/rl_plots/distance_to_goal.png)
+
+### Success rate by environment step
+
+Rolling success rate plotted against SB3 timestep — useful when comparing runs with different numbers of parallel environments.
+
+![Success rate by timestep](figures/rl_plots/success_rate_by_timestep.png)
 
 ---
 
@@ -149,9 +220,9 @@ Entry point:
 python train.py
 ```
 
-### Closed-loop evaluation with A*
+### Closed-loop evaluation with A\*
 
-Run the car through generated scenarios using only the model’s predictions from the forward camera. The planner is A* over the predicted BEV occupancy map.
+Run the car through generated scenarios using only the model's predictions from the forward camera. The planner is A\* over the predicted BEV occupancy map.
 
 Entry point:
 
@@ -194,6 +265,7 @@ python app.py
 ```text
 .
 ├── app.py                         # Gradio UI launcher
+├── full_pipeline.sh               # End-to-end pipeline script
 ├── generate.py                    # Procedural dataset generator CLI
 ├── preprocess.py                  # Dataset → memmapped training arrays
 ├── train.py                       # Train OccNet occupancy model
@@ -203,6 +275,10 @@ python app.py
 ├── run_closed_loop_rl.py          # Closed-loop PPO-over-OccNet evaluation
 ├── scripts/
 │   └── upload_models_to_hf.py     # Upload trained artifacts to Hugging Face Hub
+├── figures/
+│   ├── example_runs/run_000*/                  # Dataset generation demo figures
+│   ├── closed_loop_eval/          # Closed-loop rollout GIFs
+│   └── rl_plots/                  # PPO training curve PNGs
 ├── src/
 │   └── voxel_car/
 │       ├── common/                # Config dataclasses and shared constants
@@ -398,14 +474,14 @@ Each generated run is written as:
 ```text
 data/dataset/
 ├── manifest.json
-├── run_0000/
+├── example_runs/run_0000/
 │   ├── voxels.npz
 │   ├── trajectory.npy
 │   ├── bev_static.png
 │   ├── bev_video.mp4
 │   ├── cam_0_front.mp4
 │   └── metadata.json
-├── run_0001/
+├── example_runs/run_0001/
 │   └── ...
 └── ...
 ```
@@ -416,7 +492,7 @@ Each run includes:
 
 ```jsonc
 {
-  "run_id": "run_0000",
+  "run_id": "example_runs/run_0000",
   "generated_at": "2026-04-19T10:30:12",
   "world": {
     "seed": 100,
@@ -564,7 +640,7 @@ python train.py \
 Each training run writes:
 
 ```text
-runs/<run-name-or-timestamp>/
+runs/<run-name>/
 ├── ckpt_best.pt         # best validation IoU checkpoint
 ├── ckpt_last.pt         # final epoch checkpoint
 ├── history.jsonl        # per-epoch metrics
@@ -619,7 +695,7 @@ This is a deliberately simple monocular occupancy model. It does not perform an 
 
 ---
 
-## Closed-loop evaluation with A*
+## Closed-loop evaluation with A\*
 
 Basic usage:
 
@@ -700,7 +776,7 @@ closed_loop_runs/<timestamp>/
 
 ---
 
-## A* planner details
+## A\* planner details
 
 The planner operates on a BEV obstacle map derived from predicted occupancy.
 
@@ -909,7 +985,7 @@ The output JSON includes:
 
 ---
 
-## Closed-loop evaluation with PPO replacing A*
+## Closed-loop evaluation with PPO replacing A\*
 
 After training a PPO policy, evaluate it in the full visual closed-loop stack:
 
@@ -963,7 +1039,7 @@ Use this tab to:
 
 Use this tab to run one closed-loop scenario with:
 
-- A* planner over OccNet prediction, or
+- A\* planner over OccNet prediction, or
 - PPO-RL planner over OccNet prediction.
 
 The demo can load models from:
@@ -1220,7 +1296,7 @@ The simulator also treats close goal overshoot as success if the car came within
 
 ### The planner does not see ground truth
 
-In closed-loop A* evaluation, the planner operates on OccNet predictions. Ground-truth voxels are used only for:
+In closed-loop A\* evaluation, the planner operates on OccNet predictions. Ground-truth voxels are used only for:
 
 - rendering the camera image;
 - collision checks;
@@ -1234,7 +1310,7 @@ This means good oracle-RL performance does not guarantee good visual closed-loop
 
 ### The camera FOV mask affects training and planning
 
-The occupancy loss is masked to supervise only visible ego voxels. The A* planner separately handles close-range blind spots because some near-car cells are not visible from the mounted camera.
+The occupancy loss is masked to supervise only visible ego voxels. The A\* planner separately handles close-range blind spots because some near-car cells are not visible from the mounted camera.
 
 ### Ground is always occupied
 
@@ -1275,6 +1351,14 @@ For hundreds of thousands of samples, the image memmap can be tens of gigabytes.
 ---
 
 ## Common workflows
+
+### Full pipeline (one command)
+
+```bash
+./full_pipeline.sh
+```
+
+This runs all six stages end-to-end. See [Quick start](#quick-start--run-the-full-pipeline) for the available skip flags and knobs.
 
 ### Full occupancy-model workflow
 
@@ -1459,6 +1543,9 @@ closed_loop_rl_runs/
 ## Minimal command reference
 
 ```bash
+# Run full pipeline
+./full_pipeline.sh
+
 # Launch UI
 python app.py
 
