@@ -9,8 +9,8 @@ Two modes:
    - saves full dataset samples
 
 2. Closed-loop model demo
-   - loads trained OccNet checkpoint from Hugging Face Hub or local file
-   - optionally loads trained PPO policy from Hugging Face Hub or local file
+   - loads trained OccNet checkpoint from Hugging Face Hub
+   - optionally loads trained PPO policy from Hugging Face Hub
    - default Hub repo: mmkuznecov/SynthOccPredModels
    - runs one random scenario
    - controller:
@@ -49,7 +49,6 @@ from ..datasets.dataset import generate_sample
 from ..geometry import compute_fov_mask
 from ..simulation import (
     simulate_episode,
-    load_model_from_ckpt,
     episode_summary,
     save_episode_video,
     save_summary_figure,
@@ -68,18 +67,8 @@ from ..hub import (
 # ---------------------------------------------------------------------------
 
 
-def _expand_path(path: str | Path) -> Path:
-    return Path(os.path.expandvars(str(path))).expanduser()
-
-
 def _random_seed():
     return int(np.random.randint(0, 1_000_000))
-
-
-def _default_model_source():
-    # DEFAULT_HF_REPO is now built in as mmkuznecov/SynthOccPredModels, unless
-    # VOXEL_CAR_HF_REPO overrides it.
-    return "Hugging Face Hub" if DEFAULT_HF_REPO else "Local files"
 
 
 # ---------------------------------------------------------------------------
@@ -341,17 +330,9 @@ def save_dataset_sample(
 
 @lru_cache(maxsize=4)
 def _cached_load_occ_model(
-    model_source: str,
     repo_id: str,
     occ_hf_file: str,
-    local_occ_path: str,
 ):
-    if model_source == "Local files":
-        p = _expand_path(local_occ_path)
-        if not p.exists():
-            raise FileNotFoundError(f"Local OccNet checkpoint not found: {p}")
-        return load_model_from_ckpt(p)
-
     repo_id = str(repo_id).strip() or DEFAULT_HF_REPO
     if not repo_id:
         raise ValueError(
@@ -366,20 +347,9 @@ def _cached_load_occ_model(
 
 @lru_cache(maxsize=4)
 def _cached_load_ppo_model(
-    model_source: str,
     repo_id: str,
     rl_hf_file: str,
-    local_rl_path: str,
 ):
-    if model_source == "Local files":
-        p = _expand_path(local_rl_path)
-        if not p.exists():
-            raise FileNotFoundError(f"Local PPO policy not found: {p}")
-
-        from stable_baselines3 import PPO
-
-        return PPO.load(str(p), device="cpu")
-
     repo_id = str(repo_id).strip() or DEFAULT_HF_REPO
     if not repo_id:
         raise ValueError(
@@ -394,12 +364,9 @@ def _cached_load_ppo_model(
 
 
 def run_closed_loop_model_demo(
-    model_source,
     repo_id,
     occ_hf_file,
     rl_hf_file,
-    local_occ_path,
-    local_rl_path,
     planner_name,
     preset,
     seed,
@@ -412,10 +379,8 @@ def run_closed_loop_model_demo(
         repo_id = str(repo_id).strip() or DEFAULT_HF_REPO
 
         model, ego_cfg, cam_cfg, image_hw, device = _cached_load_occ_model(
-            str(model_source),
             repo_id,
             str(occ_hf_file),
-            str(local_occ_path),
         )
 
         H, W = image_hw
@@ -427,10 +392,8 @@ def run_closed_loop_model_demo(
 
         if str(planner_name).startswith("PPO"):
             ppo = _cached_load_ppo_model(
-                str(model_source),
                 repo_id,
                 str(rl_hf_file),
-                str(local_rl_path),
             )
             policy = RLPolicyAdapter(
                 model=ppo,
@@ -504,20 +467,11 @@ def run_closed_loop_model_demo(
             {
                 "controller": controller,
                 "planner": str(planner_name),
-                "model_source": str(model_source),
-                "repo_id": repo_id if model_source != "Local files" else None,
+                "repo_id": repo_id,
                 "occ_hf_file": str(occ_hf_file) or DEFAULT_OCC_FILENAME,
                 "rl_hf_file": (
                     str(rl_hf_file) or DEFAULT_RL_FILENAME
                     if controller == "ppo_rl"
-                    else None
-                ),
-                "local_occ_path": (
-                    str(local_occ_path) if model_source == "Local files" else None
-                ),
-                "local_rl_path": (
-                    str(local_rl_path)
-                    if model_source == "Local files" and controller == "ppo_rl"
                     else None
                 ),
                 "preset": preset,
@@ -862,19 +816,13 @@ def build_demo():
                 gr.Markdown(
                     "Run a closed-loop scenario using the trained occupancy model. "
                     "Choose either the standard A* planner or the pretrained PPO-RL planner. "
-                    f"By default, models are pulled from `{DEFAULT_HF_REPO}`."
+                    f"Models are loaded from Hugging Face Hub, using `{DEFAULT_HF_REPO}` by default."
                 )
 
                 with gr.Row():
                     with gr.Column(scale=1, min_width=420):
                         with gr.Group():
-                            gr.Markdown("### Model source")
-                            model_source = gr.Dropdown(
-                                choices=["Hugging Face Hub", "Local files"],
-                                value=_default_model_source(),
-                                label="Load models from",
-                            )
-
+                            gr.Markdown("### Hugging Face model repo")
                             repo_id = gr.Textbox(
                                 value=DEFAULT_HF_REPO,
                                 label="HF repo id",
@@ -887,16 +835,6 @@ def build_demo():
                             rl_hf_file = gr.Textbox(
                                 value=DEFAULT_RL_FILENAME,
                                 label="HF PPO policy filename",
-                            )
-
-                            gr.Markdown("Local fallback / local mode paths")
-                            local_occ_path = gr.Textbox(
-                                value="runs/20260419_223836/ckpt_best.pt",
-                                label="Local OccNet checkpoint",
-                            )
-                            local_rl_path = gr.Textbox(
-                                value="rl_runs/easy_oracle_ppo/ppo_voxel_car_final.zip",
-                                label="Local PPO policy",
                             )
 
                         with gr.Group():
@@ -960,12 +898,9 @@ def build_demo():
                 run_btn.click(
                     run_closed_loop_model_demo,
                     inputs=[
-                        model_source,
                         repo_id,
                         occ_hf_file,
                         rl_hf_file,
-                        local_occ_path,
-                        local_rl_path,
                         planner_name,
                         preset,
                         closed_seed,

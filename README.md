@@ -1,5 +1,7 @@
 # Voxel Car / SynthOccPred
 
+[Hugging Face Demo](https://huggingface.co/spaces/mmkuznecov/VoxelCar)
+
 `voxel_car` is a procedural voxel-world driving project for monocular occupancy prediction and closed-loop planning.
 
 The project builds synthetic 3D voxel road worlds, renders forward-camera driving videos, trains a neural network to predict ego-frame occupancy from a single RGB image, and evaluates closed-loop driving with either:
@@ -250,7 +252,7 @@ Launch an interactive UI for:
 - camera configuration;
 - video generation;
 - dataset sample export;
-- closed-loop model demo using local files or Hugging Face Hub models.
+- closed-loop model demo using Hugging Face Hub models.
 
 Entry point:
 
@@ -1042,10 +1044,9 @@ Use this tab to run one closed-loop scenario with:
 - A\* planner over OccNet prediction, or
 - PPO-RL planner over OccNet prediction.
 
-The demo can load models from:
+The demo loads models from:
 
-- Hugging Face Hub;
-- local files.
+- Hugging Face Hub.
 
 Default Hugging Face model repo in code:
 
