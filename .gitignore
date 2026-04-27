@@ -215,3 +215,7 @@ rl_runs
 closed_loop_rl_runs
 prompt.txt
 output/
+
+wm_data*/
+wm_runs*/
+closed_loop_wm_runs/
