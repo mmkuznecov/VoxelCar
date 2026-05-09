@@ -1,13 +1,22 @@
 """Top-down bird's-eye-view rendering.
 
 Includes:
-  * terrain colouring from voxel top-heights
+  * terrain colouring (legacy height-based, OR biome-aware from the
+    optional ``materials`` argument)
   * planned / travelled trajectory polyline
   * rotated-rectangle car glyph + yellow heading indicator
   * semi-transparent frustum wedges with coloured outlines for each camera
 
 World [i = X, j = Y]  →  display [row, col] with row indexed from the top
 (so +Y points *up* in the rendered image — north-up map convention).
+
+Biome-aware colouring
+---------------------
+``render_bev`` accepts an optional ``materials`` array. When provided, each
+column's top voxel material is looked up in ``MATERIAL_PALETTE`` and used
+directly (water = blue, sand = tan, grass = green, road = grey, etc.).
+When omitted, the original height-based ground/obstacle palette is used,
+preserving the look of every existing call site.
 """
 
 from __future__ import annotations
@@ -16,6 +25,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from .camera import compute_camera_world_pose
+from ..common.materials import MATERIAL_PALETTE, Material
 
 # ---------------------------------------------------------------------------
 # Heading / geometry helpers
@@ -111,6 +121,69 @@ def build_camera_overlays(cams, car_pos_xy, car_heading_xy, include_idxs=None):
 
 
 # ---------------------------------------------------------------------------
+# Terrain colour for the BEV background
+# ---------------------------------------------------------------------------
+
+
+def _terrain_rgb_height(voxels):
+    """Legacy height-based BEV background. Returns (X, Y, 3) float32 in [0, 1]."""
+    VX, VY, VZ = voxels.shape
+    rev = voxels[:, :, ::-1]
+    first_from_top = np.argmax(rev, axis=-1)
+    top_z = VZ - 1 - first_from_top
+    h_norm = top_z.astype(np.float32) / max(VZ - 1, 1)
+
+    ground_col = np.array([0.50, 0.40, 0.30], dtype=np.float32)
+    obs_lo = np.array([0.15, 0.45, 0.15], dtype=np.float32)
+    obs_hi = np.array([0.55, 0.85, 0.35], dtype=np.float32)
+    is_obst = top_z > 0
+    return np.where(
+        is_obst[..., None],
+        obs_lo[None, None, :] + (obs_hi - obs_lo)[None, None, :] * h_norm[..., None],
+        ground_col[None, None, :],
+    )
+
+
+def _terrain_rgb_materials(materials):
+    """Biome-aware BEV background. Looks up the palette per top voxel of
+    each column. Returns (X, Y, 3) float32 in [0, 1].
+
+    For columns that are entirely AIR (shouldn't happen with the new
+    pipeline, but guard anyway), falls back to a neutral ground colour.
+    """
+    air = int(Material.AIR)
+    not_air = materials != air
+    VZ = materials.shape[-1]
+    rev = not_air[:, :, ::-1]
+    first_from_top = np.argmax(rev, axis=-1)
+    has_any = not_air.any(axis=-1)
+    top_z = np.where(has_any, VZ - 1 - first_from_top, 0).astype(np.int32)
+
+    X, Y, _ = materials.shape
+    xs = np.arange(X)[:, None]
+    ys = np.arange(Y)[None, :]
+    surface_mat = materials[xs, ys, top_z]
+    palette = MATERIAL_PALETTE.astype(np.float32) / 255.0
+    rgb = palette[surface_mat]  # (X, Y, 3)
+
+    # Subtle height shading on land surfaces so peaks don't look flat.
+    # Skip water (we want it uniformly blue) and roads (uniform grey).
+    flat_mats = (surface_mat == int(Material.WATER)) | (
+        surface_mat == int(Material.ROAD)
+    )
+    h_norm = top_z.astype(np.float32) / max(VZ - 1, 1)
+    shading = (0.85 + 0.30 * h_norm)[..., None]  # 0.85 → 1.15
+    rgb_shaded = np.clip(rgb * shading, 0.0, 1.0)
+    rgb = np.where(flat_mats[..., None], rgb, rgb_shaded)
+
+    # Air columns (defensive): neutral ground.
+    rgb = np.where(
+        has_any[..., None], rgb, np.array([0.50, 0.40, 0.30], dtype=np.float32)
+    )
+    return rgb
+
+
+# ---------------------------------------------------------------------------
 # Main render
 # ---------------------------------------------------------------------------
 
@@ -123,28 +196,24 @@ def render_bev(
     camera_overlays=None,
     display_size=420,
     frustum_range_m=18.0,
+    materials=None,
 ):
     """Render a BEV image with terrain, trajectory, frustums, and car.
 
-    ``camera_overlays`` is a list produced by :func:`build_camera_overlays`.
+    Parameters
+    ----------
+    voxels : (X, Y, Z) bool — used as fallback when materials is None.
+    materials : optional (X, Y, Z) uint8 — when supplied, the terrain
+        background uses biome colours from MATERIAL_PALETTE rather than
+        the legacy green-and-brown height ramp.
+    camera_overlays : list produced by :func:`build_camera_overlays`.
     """
-    VX, VY, VZ = voxels.shape
+    if materials is not None:
+        bev = _terrain_rgb_materials(materials)
+    else:
+        bev = _terrain_rgb_height(voxels)
 
-    # Terrain: top-of-column height → colour.
-    rev = voxels[:, :, ::-1]
-    first_from_top = np.argmax(rev, axis=-1)
-    top_z = VZ - 1 - first_from_top
-    h_norm = top_z.astype(np.float32) / max(VZ - 1, 1)
-
-    ground_col = np.array([0.50, 0.40, 0.30], dtype=np.float32)
-    obs_lo = np.array([0.15, 0.45, 0.15], dtype=np.float32)
-    obs_hi = np.array([0.55, 0.85, 0.35], dtype=np.float32)
-    is_obst = top_z > 0
-    bev = np.where(
-        is_obst[..., None],
-        obs_lo[None, None, :] + (obs_hi - obs_lo)[None, None, :] * h_norm[..., None],
-        ground_col[None, None, :],
-    )
+    VX, VY = bev.shape[:2]
 
     scale = max(1, display_size // max(VX, VY))
     bev_r = np.repeat(np.repeat(bev, scale, axis=0), scale, axis=1)

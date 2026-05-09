@@ -3,11 +3,22 @@
 Everything here is in the world / OpenCV-camera convention documented in
 ``config``. ``CameraConfig`` is the expected input type but a plain dict
 with the same fields also works (useful for ad-hoc calls).
+
+Biome-aware rendering
+---------------------
+``render_camera_view`` accepts an optional ``materials`` argument. When
+supplied, the first-hit colour is looked up from ``MATERIAL_PALETTE``
+(blue for water, sandy for sand, green for grass, etc.). When omitted
+the function falls back to the legacy height-based colouring (green
+obstacles + brown checker ground), so all existing call sites remain
+correct without modification.
 """
 
 from __future__ import annotations
 import math
 import numpy as np
+
+from ..common.materials import MATERIAL_PALETTE, Material
 
 
 def make_camera_R(heading_xy):
@@ -67,12 +78,20 @@ def render_camera_view(
     t_near=0.2,
     t_far=80.0,
     n_samples=200,
+    materials=None,
 ):
     """Ray-march first-hit renderer.
 
-    Per-pixel rays are constructed in the camera frame, rotated to world, and
+    Per-pixel rays are constructed in the camera frame, rotated to world,
     then densely sampled at ``n_samples`` depths between ``t_near`` and
     ``t_far``. First True voxel along each ray is the hit.
+
+    Parameters
+    ----------
+    voxels : (VX, VY, VZ) bool — occupancy / ray-blocking grid. Required.
+    materials : (VX, VY, VZ) uint8 — optional. If provided, hit colours
+        come from ``MATERIAL_PALETTE``. Otherwise the legacy height-based
+        green-and-brown colouring is used.
 
     Returns an (H, W, 3) uint8 image.
     """
@@ -95,7 +114,7 @@ def render_camera_view(
     pts = (
         camera_pos[None, None, None, :]
         + dirs_world[:, :, None, :] * ts[None, None, :, None]
-    )  # (H,W,N,3)
+    )  # (H, W, N, 3)
 
     ix = np.floor(pts[..., 0]).astype(np.int32)
     iy = np.floor(pts[..., 1]).astype(np.int32)
@@ -132,24 +151,45 @@ def render_camera_view(
     lambert = np.clip((nrm * light).sum(axis=-1), 0.0, 1.0)
     shading = 0.45 + 0.55 * lambert
 
-    hit_h_norm = hit_iz.astype(np.float32) / max(VZ - 1, 1)
-    obst_lo = np.array([0.30, 0.55, 0.30], dtype=np.float32)
-    obst_hi = np.array([0.85, 0.95, 0.55], dtype=np.float32)
-    obst_rgb = (
-        obst_lo[None, None, :]
-        + (obst_hi - obst_lo)[None, None, :] * hit_h_norm[..., None]
-    )
-
-    ground_mask = hit_iz == 0
-    checker = ((hit_ix ^ hit_iy) & 1).astype(np.float32)
-    g_base = np.array([0.55, 0.44, 0.32], dtype=np.float32)
-    g_alt = np.array([0.45, 0.36, 0.28], dtype=np.float32)
-    ground_rgb = (
-        g_base[None, None, :] + (g_alt - g_base)[None, None, :] * checker[..., None]
-    )
-
-    base_rgb = np.where(ground_mask[..., None], ground_rgb, obst_rgb)
-    shaded = base_rgb * shading[..., None]
+    if materials is not None:
+        # ---- Biome-aware colouring ----
+        # Look up the palette colour for each hit voxel. Add a subtle
+        # checker so flat surfaces have texture (matches the legacy
+        # ground-checker look, just generalised across all materials).
+        hit_mat = np.where(has_hit, materials[hit_ix, hit_iy, hit_iz], 0).astype(
+            np.uint8
+        )
+        base_rgb = MATERIAL_PALETTE[hit_mat].astype(np.float32) / 255.0  # (H, W, 3)
+        checker = ((hit_ix ^ hit_iy) & 1).astype(np.float32) * 0.08 - 0.04
+        base_rgb = np.clip(base_rgb + checker[..., None], 0.0, 1.0)
+        # Water: keep a flat shading factor so ripples don't show via the
+        # lambert term (water's "normal" estimate from the voxel grid is
+        # noisy and would otherwise produce dark patches).
+        is_water = hit_mat == int(Material.WATER)
+        water_shade = 0.85
+        shaded = np.where(
+            is_water[..., None],
+            base_rgb * water_shade,
+            base_rgb * shading[..., None],
+        )
+    else:
+        # ---- Legacy height-based colouring ----
+        hit_h_norm = hit_iz.astype(np.float32) / max(VZ - 1, 1)
+        obst_lo = np.array([0.30, 0.55, 0.30], dtype=np.float32)
+        obst_hi = np.array([0.85, 0.95, 0.55], dtype=np.float32)
+        obst_rgb = (
+            obst_lo[None, None, :]
+            + (obst_hi - obst_lo)[None, None, :] * hit_h_norm[..., None]
+        )
+        ground_mask = hit_iz == 0
+        checker = ((hit_ix ^ hit_iy) & 1).astype(np.float32)
+        g_base = np.array([0.55, 0.44, 0.32], dtype=np.float32)
+        g_alt = np.array([0.45, 0.36, 0.28], dtype=np.float32)
+        ground_rgb = (
+            g_base[None, None, :] + (g_alt - g_base)[None, None, :] * checker[..., None]
+        )
+        base_rgb = np.where(ground_mask[..., None], ground_rgb, obst_rgb)
+        shaded = base_rgb * shading[..., None]
 
     # Distance fog toward horizon sky.
     t_hit = ts[first]

@@ -10,7 +10,8 @@ Yaw   : + yaw rotates a vector toward the car's right side.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
+from typing import Optional
 
 NUM_CAMERAS = 4
 
@@ -54,12 +55,66 @@ class CameraConfig:
 
 @dataclass
 class WorldConfig:
+    """Top-level world / terrain configuration.
+
+    Legacy fields (unchanged from before)
+    -------------------------------------
+    seed, grid_size, max_obstacle_height, road_width, noise_scale,
+    shoulder_extra
+        Same meaning as the old generator. Defaults match.
+
+    New biome fields (additive — defaults give a slightly richer world
+    but stay close in feel to the old one)
+    --------------------------------------------------------------
+    terrain_power : exponent applied to the noise heightmap before
+        scaling. >1 sharpens peaks and flattens valleys → more flat
+        ground. The legacy generator used 1.8; we keep that as default.
+    noise_octaves : multi-octave value-noise depth. 4 by default.
+    flat_threshold : noise values below this are forced to terrain floor
+        (= 0). Matches the legacy generator's hard-coded 0.45 threshold.
+    sea_level : 0 disables water entirely (legacy default). Set to a
+        small positive int (e.g. 1 or 2) to flood low-lying areas. Roads
+        will still carve through water as causeways.
+    shoreline_thickness : columns within this many voxels above sea level
+        render as SAND beach instead of GRASS. Only applies if
+        sea_level > 0.
+    stone_line_offset : columns at or above this height render as STONE
+        on top (rocky peaks). None disables. Set to e.g. ``max_obstacle_height-2``
+        to get visible mountain caps.
+    dirt_depth : thickness of DIRT layer under the GRASS surface.
+
+    Tree fields
+    -----------
+    n_trees : 0 disables trees. Positive values scatter trees on grass
+        columns away from the road corridor.
+    trunk_height_min/max, leaf_radius, tree_min_separation, tree_road_buffer
+        Tree placement parameters.
+    """
+
     seed: int = 42
     grid_size: int = 80
     max_obstacle_height: int = 14
     road_width: int = 3
     noise_scale: float = 18.0
     shoulder_extra: int = 2  # extra radius beyond the road where heights fade
+
+    # New biome controls — defaults preserve the old "look" closely.
+    terrain_power: float = 1.8
+    noise_octaves: int = 4
+    flat_threshold: float = 0.45
+    sea_level: int = 0
+    shoreline_thickness: int = 1
+    stone_line_offset: Optional[int] = None
+    dirt_depth: int = 2
+
+    # Trees.
+    n_trees: int = 0
+    trunk_height_min: int = 3
+    trunk_height_max: int = 5
+    leaf_radius: int = 2
+    tree_min_separation: int = 3
+    tree_road_buffer: int = 2
+    tree_seed: Optional[int] = None  # None → derived from world seed
 
     @property
     def grid_x(self) -> int:
@@ -71,7 +126,12 @@ class WorldConfig:
 
     @property
     def grid_z(self) -> int:
-        return int(self.max_obstacle_height) + 3
+        # Allow extra headroom for trees if enabled.
+        base = int(self.max_obstacle_height) + 3
+        if int(self.n_trees) > 0:
+            tree_top = int(self.trunk_height_max) + int(self.leaf_radius) + 2
+            base = max(base, int(self.max_obstacle_height) + tree_top)
+        return base
 
 
 @dataclass

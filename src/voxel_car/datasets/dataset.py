@@ -4,7 +4,9 @@ Each sample lives in its own directory with a self-contained set of artefacts
 so downstream code only needs to read ``metadata.json``::
 
     run_0000/
-        voxels.npz           — compressed boolean voxel grid + heightmap
+        voxels.npz           — compressed voxel grid + heightmap
+                                (now also stores materials when biome
+                                 features are enabled)
         trajectory.npy       — (N, 2) float32 waypoints in voxel units
         bev_static.png       — single top-down PNG (start pose, frustums shown)
         bev_video.mp4        — full drive from the BEV, car animated
@@ -12,6 +14,14 @@ so downstream code only needs to read ``metadata.json``::
         metadata.json        — all configs, seed, segment types, files map
 
 A top-level ``manifest.json`` is emitted alongside a multi-run directory.
+
+Biome integration
+-----------------
+``generate_sample`` always builds the materials grid (cheap to derive once
+the heightmap exists) and threads it through the camera and BEV renders
+so dataset images reflect the biome palette. The ``voxels.npz`` archive
+stores both ``voxels`` (bool, backward-compatible) and ``materials`` (uint8)
+so downstream consumers can choose whichever representation they need.
 """
 
 from __future__ import annotations
@@ -26,7 +36,7 @@ from PIL import Image
 
 from ..common.config import WorldConfig, TrajectoryConfig, RenderConfig, default_cameras
 from ..worldgen.trajectory import build_trajectory
-from ..worldgen.world import build_world
+from ..worldgen.world import build_world_from_config
 from ..rendering.camera import compute_camera_world_pose, render_camera_view
 from ..rendering.bev import compute_heading, render_bev, build_camera_overlays
 
@@ -49,14 +59,12 @@ def generate_sample(
     Parameters
     ----------
     out_dir     : path-like — sample directory (created if missing).
-    world_cfg   : WorldConfig.
+    world_cfg   : WorldConfig — biome/tree fields are honoured if set.
     traj_cfg    : TrajectoryConfig.
-    cameras     : list[CameraConfig] — all four; only enabled ones produce video.
+    cameras     : list[CameraConfig] — only enabled ones produce video.
     render_cfg  : RenderConfig.
     run_id      : optional string; defaults to ``out_dir.name``.
     progress_fn : optional callback ``(frame_idx, n_frames)``.
-
-    Returns the metadata dict that was also written to ``metadata.json``.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -73,20 +81,17 @@ def generate_sample(
         smoothing_window=traj_cfg.smoothing_window,
         margin=traj_cfg.margin,
     )
-    voxels, heights = build_world(
-        world_cfg.grid_x,
-        world_cfg.grid_y,
-        world_cfg.grid_z,
-        seed=world_cfg.seed,
-        noise_scale=world_cfg.noise_scale,
-        max_obstacle_height=world_cfg.max_obstacle_height,
-        road_width=world_cfg.road_width,
-        trajectory=trajectory,
-        shoulder_extra=world_cfg.shoulder_extra,
+    voxels, heights, materials, tree_positions = build_world_from_config(
+        world_cfg, trajectory, return_materials=True
     )
 
-    # --- 2. voxel grid + trajectory on disk -------------------------------
-    np.savez_compressed(out_dir / "voxels.npz", voxels=voxels, heights=heights)
+    # --- 2. voxel grid + materials + trajectory on disk -------------------
+    np.savez_compressed(
+        out_dir / "voxels.npz",
+        voxels=voxels,
+        heights=heights,
+        materials=materials,
+    )
     np.save(out_dir / "trajectory.npy", trajectory)
 
     # --- 3. static BEV at start pose --------------------------------------
@@ -100,6 +105,7 @@ def generate_sample(
         h0,
         camera_overlays=overlays_static,
         display_size=render_cfg.bev_display_size,
+        materials=materials,
     )
     Image.fromarray(bev_static).save(out_dir / "bev_static.png")
 
@@ -129,6 +135,7 @@ def generate_sample(
                 h,
                 camera_overlays=overlays,
                 display_size=render_cfg.bev_display_size,
+                materials=materials,
             )
         )
 
@@ -145,6 +152,7 @@ def generate_sample(
                     t_near=0.2,
                     t_far=t_far,
                     n_samples=render_cfg.n_samples,
+                    materials=materials,
                 )
             )
 
@@ -188,6 +196,8 @@ def generate_sample(
         "cameras": [c.to_dict() for c in cameras],
         "render": asdict(render_cfg),
         "voxel_shape": [int(x) for x in voxels.shape],
+        "n_trees": int(len(tree_positions)),
+        "tree_positions": [[int(x), int(y)] for (x, y) in tree_positions],
         "files": {
             "voxels": "voxels.npz",
             "trajectory": "trajectory.npy",
@@ -225,20 +235,6 @@ def generate_dataset(
     With ``vary_seeds=True`` (default) each run derives new world- and
     trajectory-seeds from ``base_seed + i`` / ``base_seed + i + 1000``. The
     non-seed fields of the passed configs are preserved.
-
-    Parameters
-    ----------
-    n_jobs
-        Number of parallel worker processes. ``-1`` uses all cores; ``1``
-        runs serially (and is the only mode where ``progress_fn`` is honoured,
-        since the nested per-frame callback can't cross process boundaries).
-    verbose
-        Verbosity passed to :class:`joblib.Parallel`. ``0`` silent,
-        ``>=1`` reports per-task completion.
-    backend
-        joblib backend — ``"loky"`` (default, process-based) is the right
-        choice for this CPU-heavy workload; ``"threading"`` is available for
-        debugging but will not actually parallelise the Python orchestration.
     """
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -247,8 +243,6 @@ def generate_dataset(
     cameras = cameras or default_cameras()
     render_cfg = render_cfg or RenderConfig()
 
-    # Resolve every per-run config up front so workers receive fully-formed
-    # task tuples and seeds remain deterministic regardless of execution order.
     tasks = []
     for i in range(int(n_samples)):
         run_dir = out_root / f"run_{i:04d}"
@@ -262,7 +256,6 @@ def generate_dataset(
         tasks.append((run_dir, wc, tc, f"run_{i:04d}"))
 
     if n_jobs == 1:
-        # Serial path — preserves the fine-grained per-frame progress_fn.
         run_metas = []
         for i, (run_dir, wc, tc, run_id) in enumerate(tasks):
 
@@ -282,8 +275,6 @@ def generate_dataset(
                 )
             )
     else:
-        # Parallel path — joblib's verbose handles progress; the fine-grained
-        # progress_fn is skipped since it can't cross process boundaries.
         from joblib import Parallel, delayed
 
         run_metas = Parallel(n_jobs=n_jobs, verbose=verbose, backend=backend)(

@@ -12,6 +12,14 @@ The simulator itself holds ground-truth voxels (needed only for camera
 rendering and collision detection). The model and planner only see the
 image and their own ego-frame predictions — this is the whole point of the
 evaluation.
+
+Biome-aware rendering
+---------------------
+When the scenario carries a ``materials`` grid (set by the new worldgen
+pipeline), it's passed through to ``render_camera_view`` so the camera
+image uses palette colours (water = blue, grass = green, road = grey,
+etc.). The bool ``voxels`` grid is still used for ray hit-testing and
+collision — they describe the same world.
 """
 
 from __future__ import annotations
@@ -153,24 +161,15 @@ def simulate_episode(
 ):
     """Run one closed-loop episode.
 
-    If ``policy`` is None, the existing A* planner is used.
-
-    If ``policy`` is provided, it replaces A*. The policy object must expose:
-
-        policy.act(
-            pred_occ,
-            ego_cfg,
-            car_pos,
-            car_heading,
-            world_goal,
-        ) -> PlannerResult
-
-    This is used by run_closed_loop_rl.py for:
-        camera image -> OccNet -> RL policy -> motion
+    If ``policy`` is None, the existing A* planner is used. If ``policy`` is
+    provided, it replaces A* (used by run_closed_loop_rl.py).
     """
     H, W = image_hw
     VX, VY, VZ = scenario.voxels.shape
     t_far = max(25.0, 0.85 * max(VX, VY))
+
+    # New: pull materials grid through to the renderer when present.
+    materials = getattr(scenario, "materials", None)
 
     if fov_mask is None:
         fov_mask = compute_fov_mask(
@@ -186,9 +185,6 @@ def simulate_episode(
     ep = EpisodeRecord(scenario_name=scenario.name, goal_xy=scenario.exit_xy)
     pos_history = [tuple(pos)]
 
-    # Track closest approach — lets us detect "we reached goal area then
-    # started moving away", which is effectively success even if the single-
-    # step tolerance check missed it.
     min_d_goal = math.hypot(pos[0] - scenario.exit_xy[0], pos[1] - scenario.exit_xy[1])
 
     for step in range(int(max_steps)):
@@ -204,6 +200,7 @@ def simulate_episode(
             t_near=0.2,
             t_far=t_far,
             n_samples=int(n_ray_samples),
+            materials=materials,
         )
 
         # ---- model forward ----
@@ -274,8 +271,6 @@ def simulate_episode(
                 print(f"    step {step:3d}  SUCCESS (reached goal, d={d_goal:.2f}m)")
             return ep
 
-        # Overshoot detection: if we were once well within ~1.5× tolerance and
-        # we're now moving away, count it as success.
         overshoot_tol = float(goal_tolerance) * 1.5
         if min_d_goal < overshoot_tol and d_goal > min_d_goal + 0.5:
             ep.outcome = "success"

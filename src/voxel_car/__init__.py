@@ -16,14 +16,30 @@ from .common import (
     RenderConfig,
     default_cameras,
     value_noise_2d,
+    Material,
+    MATERIAL_PALETTE,
+    MATERIAL_TABLE,
+    NUM_MATERIALS,
+    FIRST_SOLID_ID,
+    IS_SOLID,
+    BLOCKS_RAY,
+    IS_DRIVABLE,
+    material_name,
 )
 from .worldgen import (
     build_trajectory,
     build_world,
+    build_world_from_config,
     get_world_and_trajectory,
     Scenario,
     SCENARIO_PRESETS,
     generate_scenario,
+    generate_heightmap,
+    assign_materials,
+    effective_surface_z,
+    surface_material,
+    carve_road,
+    plant_trees,
 )
 from .geometry import (
     EgoGridConfig,
@@ -81,7 +97,7 @@ from .estimation import (
 )
 from .ui import demo
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     # common
@@ -94,13 +110,30 @@ __all__ = [
     "RenderConfig",
     "default_cameras",
     "value_noise_2d",
+    # materials
+    "Material",
+    "MATERIAL_PALETTE",
+    "MATERIAL_TABLE",
+    "NUM_MATERIALS",
+    "FIRST_SOLID_ID",
+    "IS_SOLID",
+    "BLOCKS_RAY",
+    "IS_DRIVABLE",
+    "material_name",
     # worldgen
     "build_trajectory",
     "build_world",
+    "build_world_from_config",
     "get_world_and_trajectory",
     "Scenario",
     "SCENARIO_PRESETS",
     "generate_scenario",
+    "generate_heightmap",
+    "assign_materials",
+    "effective_surface_z",
+    "surface_material",
+    "carve_road",
+    "plant_trees",
     # geometry
     "EgoGridConfig",
     "compute_fov_mask",

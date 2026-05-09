@@ -14,6 +14,14 @@ Each rendered frame is a 3-panel figure:
 
 ``save_episode_video`` composes every step into an MP4. A per-episode
 summary figure (final state only) is also available via ``save_summary_figure``.
+
+Biome-aware background
+----------------------
+When the scenario carries a ``materials`` grid (set by the new worldgen
+pipeline whenever ``return_materials=True``), the world BEV background
+uses palette colouring from ``MATERIAL_PALETTE``. Otherwise it falls back
+to the legacy height-based green/brown ramp, so existing scenarios that
+don't carry materials keep the old look.
 """
 
 from __future__ import annotations
@@ -26,6 +34,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import imageio.v2 as imageio
 from PIL import Image
+
+from ..common.materials import MATERIAL_PALETTE, Material
 
 # ---------------------------------------------------------------------------
 # Palette
@@ -53,12 +63,42 @@ _BG_OUTCOME = {
 
 
 # ---------------------------------------------------------------------------
-# World BEV background (raw terrain from voxels, drawn in matplotlib coords)
+# World BEV background
 # ---------------------------------------------------------------------------
 
 
-def _world_terrain_bev(voxels):
-    """Return a ``(VX, VY, 3)`` float32 RGB image of terrain heights."""
+def _world_terrain_bev(voxels, materials=None):
+    """Return a ``(VX, VY, 3)`` float32 RGB image of terrain heights.
+
+    If ``materials`` is supplied, the colour for each column is the palette
+    entry for its top voxel material. Otherwise the legacy height-based
+    green-and-brown look is used.
+    """
+    if materials is not None:
+        air = int(Material.AIR)
+        not_air = materials != air
+        VZ = materials.shape[-1]
+        rev = not_air[:, :, ::-1]
+        first_from_top = np.argmax(rev, axis=-1)
+        has_any = not_air.any(axis=-1)
+        top_z = np.where(has_any, VZ - 1 - first_from_top, 0).astype(np.int32)
+
+        X, Y, _ = materials.shape
+        xs = np.arange(X)[:, None]
+        ys = np.arange(Y)[None, :]
+        surface_mat = materials[xs, ys, top_z]
+        palette = MATERIAL_PALETTE.astype(np.float32) / 255.0
+        rgb = palette[surface_mat]
+
+        flat_mats = (surface_mat == int(Material.WATER)) | (
+            surface_mat == int(Material.ROAD)
+        )
+        h_norm = top_z.astype(np.float32) / max(VZ - 1, 1)
+        shading = (0.85 + 0.30 * h_norm)[..., None]
+        rgb_shaded = np.clip(rgb * shading, 0.0, 1.0)
+        return np.where(flat_mats[..., None], rgb, rgb_shaded).astype(np.float32)
+
+    # Legacy height-based path.
     VX, VY, VZ = voxels.shape
     rev = voxels[:, :, ::-1]
     first_from_top = np.argmax(rev, axis=-1)
@@ -214,7 +254,11 @@ def render_episode_frame(
     outcome=None,
     figsize=(13.5, 6.4),
 ):
-    """Render one dashboard frame for a single simulation step."""
+    """Render one dashboard frame for a single simulation step.
+
+    The world BEV uses biome colouring whenever ``scenario.materials`` is
+    set; otherwise it falls back to the legacy height-based palette.
+    """
     fig = plt.figure(figsize=figsize)
     gs = fig.add_gridspec(
         2,
@@ -229,7 +273,8 @@ def render_episode_frame(
     ax_pred = fig.add_subplot(gs[1, 1])
 
     # ---- world BEV ----
-    terrain = _world_terrain_bev(scenario.voxels)
+    materials = getattr(scenario, "materials", None)
+    terrain = _world_terrain_bev(scenario.voxels, materials=materials)
     VX, VY = terrain.shape[:2]
     # Transpose so row index → y, col index → x; origin='lower' puts +y up.
     ax_world.imshow(
@@ -323,10 +368,7 @@ def _fig_to_rgb(fig, dpi=90):
 def save_episode_video(
     episode, scenario, cam_cfg, ego_cfg, out_path, fps=4, dpi=80, progress_fn=None
 ):
-    """Render every step to a frame and write an MP4.
-
-    Returns the final frame size (w, h) so callers can pre-allocate if needed.
-    """
+    """Render every step to a frame and write an MP4."""
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -342,10 +384,8 @@ def save_episode_video(
         fr = _fig_to_rgb(fig, dpi=dpi)
         plt.close(fig)
 
-        # Pad/crop all frames to a consistent size for the encoder.
         if H0 is None:
             H0, W0 = fr.shape[:2]
-            # Ensure even dimensions (required by most codecs).
             H0 -= H0 % 2
             W0 -= W0 % 2
         fr = fr[:H0, :W0]
